@@ -1,0 +1,17 @@
+{
+  "name": "evolveflow",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces",
+    "lint": "npm run lint --workspaces",
+    "test": "npm run test --workspaces"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "prettier": "^3.2.0"
+  }
+}
