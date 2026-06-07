@@ -1,22 +1,45 @@
 import React, { useState, useEffect } from 'react';
+import { ArrowRight, CheckCircle2, ListPlus, Sparkles } from 'lucide-react';
 import { callCapability } from '../lib/tauri';
+import { useI18n } from '../lib/i18n';
 
 interface OnboardingFlowProps {
   onComplete: () => void;
 }
 
 export default function OnboardingFlow({ onComplete }: OnboardingFlowProps) {
+  const { t } = useI18n();
   const [step, setStep] = useState(1);
   const [taskTitle, setTaskTitle] = useState('');
   const [createdTaskId, setCreatedTaskId] = useState<string | null>(null);
+  const [hasApiKey, setHasApiKey] = useState<boolean | null>(null);
 
   useEffect(() => {
     document.body.style.overflow = 'hidden';
     return () => { document.body.style.overflow = ''; };
   }, []);
 
+  useEffect(() => {
+    if (step === 3) {
+      checkApiKeyStatus();
+    }
+  }, [step]);
+
+  async function checkApiKeyStatus() {
+    try {
+      const result = await callCapability('api_key.status', {}) as {
+        success?: boolean;
+        data?: { configured: boolean };
+        configured?: boolean;
+      };
+      setHasApiKey(!!(result.data?.configured ?? result.configured));
+    } catch {
+      setHasApiKey(false);
+    }
+  }
+
   async function handleCreateFirstTask() {
-    if (!taskTitle.trim()) return;
+    if (!taskTitle.trim()) {return;}
     try {
       const result = await callCapability('task.create', { title: taskTitle }) as { success: boolean; data?: { id: string } };
       if (result.success && result.data) {
@@ -45,96 +68,95 @@ export default function OnboardingFlow({ onComplete }: OnboardingFlowProps) {
     onComplete();
   }
 
-  const overlayStyle: React.CSSProperties = {
-    position: 'fixed', inset: 0, zIndex: 10000,
-    background: 'linear-gradient(135deg, #4a6fa5, #6b8ec9)',
-    display: 'flex', flexDirection: 'column',
-    alignItems: 'center', justifyContent: 'center',
-    color: 'white', padding: 20,
-  };
-
   return (
-    <div style={overlayStyle}>
+    <div className="onboarding-overlay">
+      <div className="onboarding-shell">
+        <div className="logo-mark">
+          <Sparkles size={18} />
+        </div>
+        <div className="onboarding-steps" aria-label="Onboarding progress">
+          {[1, 2, 3].map((item) => (
+            <span key={item} className={`onboarding-step ${step >= item ? 'active' : ''}`} />
+          ))}
+        </div>
+
       {step === 1 && (
-        <div style={{ textAlign: 'center', maxWidth: 500 }}>
-          <h1 style={{ fontSize: 36, marginBottom: 16 }}>👋 欢迎使用 EvolveFlow</h1>
-          <p style={{ fontSize: 18, marginBottom: 32, opacity: 0.9 }}>
-            你的智能日程助手，帮你轻松管理时间和任务。
+        <div className="onboarding-card">
+          <h1>{t('onboarding.welcome_title')}</h1>
+          <p>
+            {t('onboarding.welcome_desc')}
           </p>
-          <div style={{ display: 'flex', gap: 12, justifyContent: 'center' }}>
-            <button
-              style={{
-                padding: '14px 32px', borderRadius: 8, border: 'none',
-                background: 'white', color: '#4a6fa5', fontSize: 16, fontWeight: 600,
-                cursor: 'pointer',
-              }}
-              onClick={() => setStep(2)}
-            >开始使用</button>
-            <button
-              style={{
-                padding: '14px 32px', borderRadius: 8, border: '2px solid rgba(255,255,255,0.5)',
-                background: 'transparent', color: 'white', fontSize: 16, cursor: 'pointer',
-              }}
-              onClick={handleSkip}
-            >跳过引导</button>
+          <div className="onboarding-actions">
+            <button className="btn btn-primary" onClick={() => setStep(2)}>
+              {t('onboarding.start')}
+              <ArrowRight size={16} />
+            </button>
+            <button className="btn btn-secondary" onClick={handleSkip}>{t('onboarding.skip')}</button>
           </div>
         </div>
       )}
 
       {step === 2 && (
-        <div style={{ textAlign: 'center', maxWidth: 500 }}>
-          <h2 style={{ fontSize: 28, marginBottom: 12 }}>📝 创建你的第一个任务</h2>
-          <p style={{ fontSize: 16, marginBottom: 24, opacity: 0.9 }}>
-            试试看！输入一个你想做的事情，比如"准备明天的会议"
+        <div className="onboarding-card">
+          <h1>
+            <ListPlus size={26} />
+            {t('onboarding.step2_title')}
+          </h1>
+          <p>
+            {t('onboarding.step2_desc')}
           </p>
-          <div style={{ display: 'flex', gap: 12, justifyContent: 'center' }}>
+          <div className="onboarding-form">
             <input
               type="text"
-              placeholder="例如：准备明天的会议"
+              placeholder={t('onboarding.step2_placeholder')}
               value={taskTitle}
               onChange={(e) => setTaskTitle(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && handleCreateFirstTask()}
-              style={{
-                padding: '12px 16px', borderRadius: 8, border: 'none',
-                fontSize: 16, width: 300,
-              }}
             />
-            <button
-              style={{
-                padding: '12px 24px', borderRadius: 8, border: 'none',
-                background: 'white', color: '#4a6fa5', fontSize: 16, fontWeight: 600,
-                cursor: 'pointer',
-              }}
-              onClick={handleCreateFirstTask}
-            >创建</button>
+            <button className="btn btn-primary" onClick={handleCreateFirstTask}>
+              <ListPlus size={16} />
+              {t('onboarding.step2_create')}
+            </button>
           </div>
         </div>
       )}
 
       {step === 3 && (
-        <div style={{ textAlign: 'center', maxWidth: 500 }}>
-          <h2 style={{ fontSize: 28, marginBottom: 12 }}>🎉 太棒了！</h2>
-          <p style={{ fontSize: 16, marginBottom: 8, opacity: 0.9 }}>
-            你已成功创建了第一个任务！
+        <div className="onboarding-card">
+          <h1>
+            <CheckCircle2 size={26} />
+            {t('onboarding.step3_title')}
+          </h1>
+          <p>
+            {t('onboarding.step3_desc1')}
           </p>
           {createdTaskId && (
-            <p style={{ fontSize: 14, marginBottom: 24, opacity: 0.7 }}>
-              任务 ID: {createdTaskId.slice(0, 8)}...
+            <p className="field-help">
+              {t('onboarding.step3_task_id', { id: createdTaskId.slice(0, 8) })}
             </p>
           )}
-          <p style={{ fontSize: 16, marginBottom: 32, opacity: 0.9 }}>
-            接下来，让我帮你排程今天，看看你的日程安排。
+          <p>
+            {t('onboarding.step3_desc2')}
           </p>
-          <button
-            style={{
-              padding: '14px 32px', borderRadius: 8, border: 'none',
-              background: 'white', color: '#4a6fa5', fontSize: 16, fontWeight: 600,
-              cursor: 'pointer',
-            }}
-            onClick={handleViewSchedule}
-          >查看我的日程</button>
+          <div className="onboarding-actions">
+            <button className="btn btn-primary" onClick={handleViewSchedule}>
+              {t('onboarding.step3_view_schedule')}
+              <ArrowRight size={16} />
+            </button>
+          </div>
+          {hasApiKey === false && (
+            <p className="onboarding-note">
+              {t('onboarding.step3_no_api_key')}
+              <span
+                className="onboarding-link"
+                onClick={() => { window.location.hash = '#settings-ai'; onComplete(); }}
+              >{t('onboarding.step3_go_settings')}</span>
+              {t('onboarding.step3_enable_ai')}
+            </p>
+          )}
         </div>
       )}
+      </div>
     </div>
   );
 }

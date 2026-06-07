@@ -17,28 +17,35 @@ export class ExportService {
     }
   }
 
+  /**
+   * Export a day's schedule as a valid HTML5 document with proper charset and styling.
+   */
   exportDayToHtml(day: ExportableDay): string {
     const html = `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
-  <title>EvolveFlow - ${day.date}</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>EvolveFlow - ${this.escapeHtml(day.date)}</title>
   <style>
-    body { font-family: -apple-system, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
     h1 { color: #4a6fa5; }
+    h2 { color: #333; border-bottom: 1px solid #eee; padding-bottom: 4px; }
     .task { padding: 8px; margin: 4px 0; border-left: 3px solid #4a6fa5; background: #f8f9fa; }
     .task.completed { opacity: 0.6; text-decoration: line-through; }
     .event { padding: 8px; margin: 4px 0; border-left: 3px solid #3b82f6; background: #e8f0fe; }
     .time { color: #888; font-size: 12px; }
+    .footer { margin-top: 24px; font-size: 12px; color: #999; border-top: 1px solid #eee; padding-top: 8px; }
     @media print { body { padding: 0; } }
   </style>
 </head>
 <body>
-  <h1>${day.date} 日程</h1>
+  <h1>${this.escapeHtml(day.date)} - EvolveFlow 日程</h1>
   <h2>事件</h2>
-  ${day.events.map((e) => `<div class="event"><strong>${e.title}</strong> <span class="time">${e.start_time} - ${e.end_time}</span></div>`).join('\n')}
+  ${day.events.map((e) => `<div class="event"><strong>${this.escapeHtml(e.title)}</strong> <span class="time">${this.escapeHtml(e.start_time)} - ${this.escapeHtml(e.end_time)}</span></div>`).join('\n')}
   <h2>任务</h2>
-  ${day.tasks.map((t) => `<div class="task ${t.status === 'completed' ? 'completed' : ''}"><strong>${t.title}</strong> ${t.start_time ? `<span class="time">${t.start_time} - ${t.end_time}</span>` : ''}</div>`).join('\n')}
+  ${day.tasks.map((t) => `<div class="task ${t.status === 'completed' ? 'completed' : ''}"><strong>${this.escapeHtml(t.title)}</strong> ${t.start_time ? `<span class="time">${this.escapeHtml(t.start_time)} - ${this.escapeHtml(t.end_time ?? '')}</span>` : ''}</div>`).join('\n')}
+  <div class="footer">导出时间: ${new Date().toISOString()}</div>
 </body>
 </html>`;
 
@@ -47,11 +54,11 @@ export class ExportService {
     return filePath;
   }
 
-  exportDayToPdf(day: ExportableDay): string {
-    const html = this.exportDayToHtml(day);
-    const pdfPath = path.join(this.exportsDir, `schedule-${day.date}.pdf`);
-
-    // Generate a simple text-based PDF representation
+  /**
+   * Export a day's schedule as a plain text file (.txt).
+   * Replaces the previous broken text-as-PDF implementation.
+   */
+  exportDayToTxt(day: ExportableDay): string {
     const lines: string[] = [
       '========================================',
       `  EvolveFlow - 日程导出`,
@@ -62,15 +69,22 @@ export class ExportService {
     ];
 
     for (const event of day.events) {
-      lines.push(`  ${event.start_time.slice(11, 16)}-${event.end_time.slice(11, 16)}  ${event.title}`);
+      const start = event.start_time.length > 11 ? event.start_time.slice(11, 16) : event.start_time;
+      const end = event.end_time.length > 11 ? event.end_time.slice(11, 16) : event.end_time;
+      lines.push(`  ${start}-${end}  ${event.title}`);
     }
 
     lines.push('');
     lines.push('--- 任务 ---');
 
     for (const task of day.tasks) {
-      const status = task.status === 'completed' ? '[✓]' : '[ ]';
-      const time = task.start_time ? ` ${task.start_time.slice(11, 16)}-${task.end_time?.slice(11, 16)}` : '';
+      const status = task.status === 'completed' ? '[x]' : '[ ]';
+      let time = '';
+      if (task.start_time) {
+        const start = task.start_time.length > 11 ? task.start_time.slice(11, 16) : task.start_time;
+        const end = task.end_time && task.end_time.length > 11 ? task.end_time.slice(11, 16) : '';
+        time = end ? ` ${start}-${end}` : ` ${start}`;
+      }
       lines.push(`  ${status} ${task.title}${time}`);
     }
 
@@ -78,61 +92,20 @@ export class ExportService {
     lines.push(`导出时间: ${new Date().toISOString()}`);
     lines.push('========================================');
 
-    fs.writeFileSync(pdfPath, lines.join('\n'), 'utf-8');
-    return pdfPath;
+    const filePath = path.join(this.exportsDir, `schedule-${day.date}.txt`);
+    fs.writeFileSync(filePath, lines.join('\n'), 'utf-8');
+    return filePath;
   }
 
-  exportDayToPdfBinary(day: ExportableDay): string {
-    // For full PDF with proper formatting, use the HTML and print
-    // This generates a minimal valid PDF
-    const htmlPath = this.exportDayToHtml(day);
-    const pdfPath = path.join(this.exportsDir, `schedule-${day.date}.pdf`);
-
-    // Generate a valid but minimal PDF
-    const content = `%PDF-1.4
-1 0 obj
-<< /Type /Catalog /Pages 2 0 R >>
-endobj
-
-2 0 obj
-<< /Type /Pages /Kids [3 0 R] /Count 1 >>
-endobj
-
-3 0 obj
-<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]
-   /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>
-endobj
-
-4 0 obj
-<< /Length 44 >>
-stream
-BT /F1 12 Tf 50 750 Td (EvolveFlow - ${day.date}) Tj ET
-BT /F1 10 Tf 50 720 Td (Events:) Tj ET
-${day.events.map((e, i) => `BT /F1 10 Tf 50 ${700 - i * 20} Td (${e.start_time.slice(11,16)}-${e.end_time.slice(11,16)} ${e.title}) Tj ET`).join('\n')}
-${day.tasks.map((t, i) => `BT /F1 10 Tf 50 ${700 - (day.events.length + i + 1) * 20} Td (${t.status === 'completed' ? '[x]' : '[ ]'} ${t.title}) Tj ET`).join('\n')}
-endstream
-endobj
-
-5 0 obj
-<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
-endobj
-
-xref
-0 6
-0000000000 65535 f 
-0000000009 00000 n 
-0000000058 00000 n 
-0000000115 00000 n 
-0000000266 00000 n 
-0000000360 00000 n 
-
-trailer
-<< /Size 6 /Root 1 0 R >>
-startxref
-410
-%%EOF`;
-
-    fs.writeFileSync(pdfPath, content, 'utf-8');
-    return pdfPath;
+  /**
+   * Escape special HTML characters to prevent injection.
+   */
+  private escapeHtml(text: string): string {
+    return text
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#039;');
   }
 }

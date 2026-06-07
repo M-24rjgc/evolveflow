@@ -1,126 +1,130 @@
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { EvolveFlowDatabase } from '@evolveflow/storage';
-import { createRegistry } from '../src/capabilities';
+import { createRegistry } from '../src/capabilities.js';
 import * as path from 'path';
 import * as os from 'os';
 import * as fs from 'fs';
 
-let db: EvolveFlowDatabase;
-let tmpDir: string;
+describe('Capability Registry', () => {
+  let db: EvolveFlowDatabase;
+  let tmpDir: string;
 
-function setup() {
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'evolveflow-test-'));
-  db = new EvolveFlowDatabase(path.join(tmpDir, 'test.db'));
-}
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'evolveflow-test-'));
+    db = new EvolveFlowDatabase(path.join(tmpDir, 'test.db'));
+  });
 
-function teardown() {
-  db.close();
-  fs.rmSync(tmpDir, { recursive: true, force: true });
-}
+  afterEach(() => {
+    db.close();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
 
-function assert(condition: boolean, message: string) {
-  if (!condition) throw new Error(`Assertion failed: ${message}`);
-}
-
-async function testAllCapabilitiesRegistered() {
-  setup();
-  try {
+  it('should register the production capability surface', () => {
     const registry = createRegistry(db);
     const caps = registry.list();
-    assert(caps.length === 18, `Should have 18 capabilities, got ${caps.length}`);
-    console.log('  ✅ testAllCapabilitiesRegistered passed');
-  } finally {
-    teardown();
-  }
-}
 
-async function testTaskCreateCapability() {
-  setup();
-  try {
+    expect(caps.map((cap) => cap.name).sort()).toEqual([
+      'ai.cancel_stream',
+      'ai.chat',
+      'ai.check_connectivity',
+      'ai.delete_session',
+      'ai.get_context',
+      'ai.stream',
+      'api_key.status',
+      'backup.create',
+      'backup.delete',
+      'backup.list',
+      'backup.restore',
+      'backup.verify',
+      'buddy.comment',
+      'buddy.greet',
+      'dream.get_insights',
+      'dream.run',
+      'dream.status',
+      'event.create',
+      'event.delete',
+      'event.find_conflicts',
+      'event.list',
+      'event.lock',
+      'event.update',
+      'history.list_actions',
+      'memory.clear_ai_history',
+      'memory.clear_learned_state',
+      'preference.get',
+      'preference.set',
+      'reminder.list',
+      'reminder.snooze',
+      'schedule.analyze_quality',
+      'schedule.explain',
+      'schedule.get_blocks',
+      'schedule.plan_day',
+      'schedule.plan_range',
+      'schedule.rebalance',
+      'summary.generate_daily',
+      'task.cancel',
+      'task.complete',
+      'task.create',
+      'task.defer',
+      'task.delete',
+      'task.list',
+      'task.lock',
+      'task.update',
+      'undo.revert_action',
+    ]);
+  });
+
+  it('should invoke task.create capability', async () => {
     const registry = createRegistry(db);
     const result = await registry.invoke('task.create', { title: 'Test via capability' }, { actor: 'user', origin: 'gui' });
-    assert(result.success === true, 'Should succeed');
-    assert((result.data as Record<string, unknown>).title === 'Test via capability', 'Title should match');
-    console.log('  ✅ testTaskCreateCapability passed');
-  } finally {
-    teardown();
-  }
-}
 
-async function testMissingRequiredField() {
-  setup();
-  try {
+    expect(result.success).toBe(true);
+    expect((result.data as Record<string, unknown>).title).toBe('Test via capability');
+  });
+
+  it('should fail when required field is missing', async () => {
     const registry = createRegistry(db);
     const result = await registry.invoke('task.create', {}, { actor: 'user', origin: 'gui' });
-    assert(result.success === false, 'Should fail without title');
-    assert(result.error?.includes('Missing required field'), 'Should mention missing field');
-    console.log('  ✅ testMissingRequiredField passed');
-  } finally {
-    teardown();
-  }
-}
 
-async function testUnknownCapability() {
-  setup();
-  try {
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Missing required field');
+  });
+
+  it('should fail for unknown capability', async () => {
     const registry = createRegistry(db);
     const result = await registry.invoke('unknown.capability', {}, { actor: 'user', origin: 'gui' });
-    assert(result.success === false, 'Should fail for unknown capability');
-    console.log('  ✅ testUnknownCapability passed');
-  } finally {
-    teardown();
-  }
-}
 
-async function testIdempotency() {
-  setup();
-  try {
+    expect(result.success).toBe(false);
+  });
+
+  it('should return cached result for idempotent calls', async () => {
     const registry = createRegistry(db);
     const ctx = { actor: 'user' as const, origin: 'gui' as const, idempotency_key: 'unique-key-1' };
+
     const result1 = await registry.invoke('task.create', { title: 'Idempotent task' }, ctx);
     const result2 = await registry.invoke('task.create', { title: 'Idempotent task' }, ctx);
-    assert(result1.success === true, 'First call should succeed');
-    assert(result2.success === true, 'Second call should return cached result');
-    console.log('  ✅ testIdempotency passed');
-  } finally {
-    teardown();
-  }
-}
 
-async function testRevisionIncrement() {
-  setup();
-  try {
+    expect(result1.success).toBe(true);
+    expect(result2.success).toBe(true);
+  });
+
+  it('should increment revision after mutating call', async () => {
     const registry = createRegistry(db);
     const revBefore = db.getRevision();
-    await registry.invoke('task.create', { title: 'Revision test' }, { actor: 'user', origin: 'gui' });
-    const revAfter = db.getRevision();
-    assert(revAfter > revBefore, 'Revision should increment after mutating capability');
-    console.log('  ✅ testRevisionIncrement passed');
-  } finally {
-    teardown();
-  }
-}
 
-async function testNonMutatingCapabilityNoRevisionChange() {
-  setup();
-  try {
+    await registry.invoke('task.create', { title: 'Revision test' }, { actor: 'user', origin: 'gui' });
+
+    const revAfter = db.getRevision();
+    expect(revAfter).toBeGreaterThan(revBefore);
+  });
+
+  it('should not change revision for non-mutating capability', async () => {
     const registry = createRegistry(db);
     await registry.invoke('task.create', { title: 'Setup' }, { actor: 'user', origin: 'gui' });
+
     const revBefore = db.getRevision();
     await registry.invoke('history.list_actions', {}, { actor: 'user', origin: 'gui' });
     const revAfter = db.getRevision();
-    assert(revAfter === revBefore, 'Revision should not change for non-mutating capability');
-    console.log('  ✅ testNonMutatingCapabilityNoRevisionChange passed');
-  } finally {
-    teardown();
-  }
-}
 
-console.log('\n🧪 Capability Registry Tests:');
-await testAllCapabilitiesRegistered();
-await testTaskCreateCapability();
-await testMissingRequiredField();
-await testUnknownCapability();
-await testIdempotency();
-await testRevisionIncrement();
-await testNonMutatingCapabilityNoRevisionChange();
-console.log('  All Capability Registry tests passed!\n');
+    expect(revAfter).toBe(revBefore);
+  });
+});

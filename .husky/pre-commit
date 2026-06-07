@@ -1,0 +1,4 @@
+echo "Running pre-commit checks..."
+
+# Run lint-staged (eslint + prettier on staged files)
+npx lint-staged --allow-empty

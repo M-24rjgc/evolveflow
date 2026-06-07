@@ -12,38 +12,93 @@ import {
   PreferenceService,
   MemoryProjectionService,
 } from '@evolveflow/domain';
-import { EvolveFlowDatabase } from '@evolveflow/storage';
+import type { TaskStatus } from '@evolveflow/domain';
+import { EvolveFlowDatabase, BackupService } from '@evolveflow/storage';
+import * as fs from 'fs';
+import * as path from 'path';
 
-export function createRegistry(db: EvolveFlowDatabase): CapabilityRegistry {
+const TASK_STATUSES: ReadonlySet<string> = new Set(['pending', 'in_progress', 'completed', 'deferred', 'cancelled']);
+
+export function createRegistry(db: EvolveFlowDatabase, dataDir?: string): CapabilityRegistry {
   const registry = new CapabilityRegistry();
   const database = db.getDb();
 
   const taskService = new TaskService(database);
   const eventService = new EventService(database);
-  const scheduleService = new ScheduleService(database, taskService, eventService);
   const reminderService = new ReminderService(database);
   const actionLogService = new ActionLogService(database);
   const undoService = new UndoService(database, actionLogService);
   const summaryService = new SummaryService(database, taskService);
   const preferenceService = new PreferenceService(database);
+  const scheduleService = new ScheduleService(database, taskService, eventService, preferenceService);
   const memoryProjectionService = new MemoryProjectionService(database, preferenceService);
+
+  const backupService = dataDir ? new BackupService(db, dataDir) : undefined;
+  const backupOutputDir = dataDir ? path.join(dataDir, 'backups') : undefined;
+
+  const getStateBefore = (name: string, input: Record<string, unknown>): Record<string, unknown> | undefined => {
+    try {
+      if (name.startsWith('task.') && name !== 'task.create') {
+        const taskId = input.task_id as string | undefined;
+        const task = taskId ? taskService.getById(taskId) : null;
+        return task ? { ...task } : undefined;
+      }
+      if (name.startsWith('event.') && name !== 'event.create') {
+        const eventId = input.event_id as string | undefined;
+        const event = eventId ? eventService.getById(eventId) : null;
+        return event ? { ...event } : undefined;
+      }
+      if (name === 'schedule.plan_day' || name === 'schedule.rebalance') {
+        const date = (input.date as string | undefined) ?? new Date().toISOString().split('T')[0];
+        return { date, blocks: JSON.stringify(scheduleService.getDaySchedule(date)) };
+      }
+      if (name.startsWith('reminder.')) {
+        const reminderId = input.reminder_id as string | undefined;
+        if (reminderId) {
+          const row = database.prepare('SELECT * FROM reminders WHERE id = ?').get(reminderId) as Record<string, unknown> | undefined;
+          return row ? { ...row } : undefined;
+        }
+      }
+      if (name.startsWith('preference.')) {
+        const key = input.key as string | undefined;
+        if (key) {
+          const value = preferenceService.get(key);
+          return { key, value: value ?? '' };
+        }
+      }
+    } catch (snapshotErr) {
+      console.error(`Failed to snapshot state before ${name}:`, snapshotErr);
+    }
+    return undefined;
+  };
+
+  const getStateAfter = (result: CapabilityResult): Record<string, unknown> | undefined => {
+    if (!result.data || typeof result.data !== 'object') {return undefined;}
+    if (Array.isArray(result.data)) {return { items: result.data };}
+    return result.data as Record<string, unknown>;
+  };
 
   const wrapMutating = (
     name: string,
     handler: (input: Record<string, unknown>, context: CapabilityContext) => Promise<CapabilityResult>,
   ) => {
     return async (input: Record<string, unknown>, context: CapabilityContext): Promise<CapabilityResult> => {
+      const stateBefore = getStateBefore(name, input);
       const result = await handler(input, context);
       if (result.success) {
-        db.incrementRevision();
+        const revision = db.incrementRevision();
+        result.revision = revision;
         try {
-          actionLogService.record({
+          const actionLog = actionLogService.record({
             capability: name,
             actor: context.actor,
             origin: context.origin,
-            idempotency_key: context.idempotency_key,
-            input_snapshot: JSON.stringify(input),
+            idempotencyKey: context.idempotency_key,
+            inputSnapshot: input,
+            stateBefore,
+            stateAfter: getStateAfter(result),
           });
+          result.action_log_id = actionLog.id;
         } catch (logErr) {
           console.error(`Failed to record action log for ${name}:`, logErr);
         }
@@ -175,6 +230,38 @@ export function createRegistry(db: EvolveFlowDatabase): CapabilityRegistry {
   });
 
   registry.register({
+    name: 'task.delete',
+    domain: 'task',
+    description: '删除任务',
+    inputSchema: { type: 'object', required: ['task_id'], properties: { task_id: { type: 'string' } } },
+    mutating: true,
+    handler: wrapMutating('task.delete', async (input) => {
+      try {
+        taskService.delete(input.task_id as string);
+        return { success: true };
+      } catch (e) {
+        return { success: false, error: (e as Error).message };
+      }
+    }),
+  });
+
+  registry.register({
+    name: 'task.cancel',
+    domain: 'task',
+    description: '取消任务',
+    inputSchema: { type: 'object', required: ['task_id'], properties: { task_id: { type: 'string' } } },
+    mutating: true,
+    handler: wrapMutating('task.cancel', async (input) => {
+      try {
+        const task = taskService.cancel(input.task_id as string);
+        return { success: true, data: task };
+      } catch (e) {
+        return { success: false, error: (e as Error).message };
+      }
+    }),
+  });
+
+  registry.register({
     name: 'event.create',
     domain: 'event',
     description: '创建新事件',
@@ -251,9 +338,25 @@ export function createRegistry(db: EvolveFlowDatabase): CapabilityRegistry {
   });
 
   registry.register({
+    name: 'event.delete',
+    domain: 'event',
+    description: '删除事件',
+    inputSchema: { type: 'object', required: ['event_id'], properties: { event_id: { type: 'string' } } },
+    mutating: true,
+    handler: wrapMutating('event.delete', async (input) => {
+      try {
+        eventService.delete(input.event_id as string);
+        return { success: true };
+      } catch (e) {
+        return { success: false, error: (e as Error).message };
+      }
+    }),
+  });
+
+  registry.register({
     name: 'schedule.plan_day',
     domain: 'schedule',
-    description: '排程指定日期',
+    description: '排程指定日期 (优化加权评分算法)',
     inputSchema: { type: 'object', properties: { date: { type: 'string' } } },
     mutating: true,
     handler: wrapMutating('schedule.plan_day', async (input) => {
@@ -292,6 +395,19 @@ export function createRegistry(db: EvolveFlowDatabase): CapabilityRegistry {
   });
 
   registry.register({
+    name: 'schedule.get_blocks',
+    domain: 'schedule',
+    description: '获取指定日期的排程块（只读，不触发排程）',
+    inputSchema: { type: 'object', properties: { date: { type: 'string' } } },
+    mutating: false,
+    handler: async (input) => {
+      const date = (input.date as string) ?? new Date().toISOString().split('T')[0];
+      const blocks = scheduleService.getDaySchedule(date);
+      return { success: true, data: blocks };
+    },
+  });
+
+  registry.register({
     name: 'schedule.explain',
     domain: 'schedule',
     description: '解释排程原因',
@@ -300,6 +416,19 @@ export function createRegistry(db: EvolveFlowDatabase): CapabilityRegistry {
     handler: async (input) => {
       const explanation = scheduleService.explain(input.schedule_block_id as string);
       return { success: true, data: explanation };
+    },
+  });
+
+  registry.register({
+    name: 'schedule.analyze_quality',
+    domain: 'schedule',
+    description: '分析排程质量',
+    inputSchema: { type: 'object', properties: { date: { type: 'string' } } },
+    mutating: false,
+    handler: async (input) => {
+      const date = (input.date as string) ?? new Date().toISOString().split('T')[0];
+      const metrics = scheduleService.analyzeScheduleQuality(date);
+      return { success: true, data: metrics };
     },
   });
 
@@ -396,7 +525,7 @@ export function createRegistry(db: EvolveFlowDatabase): CapabilityRegistry {
       if (includeDream) {
         memoryProjectionService.clearDreamProjections();
       }
-      memoryProjectionService.clearAllLearnedState();
+      memoryProjectionService.clearAllLearnedState(!includeDream);
       return { success: true };
     }),
   });
@@ -411,9 +540,11 @@ export function createRegistry(db: EvolveFlowDatabase): CapabilityRegistry {
     },
     mutating: false,
     handler: async (input) => {
-      const filters: { status?: string; project?: string } = {};
-      if (input.status) filters.status = input.status as string;
-      if (input.project) filters.project = input.project as string;
+      const filters: { status?: TaskStatus; project?: string } = {};
+      if (typeof input.status === 'string' && TASK_STATUSES.has(input.status)) {
+        filters.status = input.status as TaskStatus;
+      }
+      if (input.project) {filters.project = input.project as string;}
       const tasks = taskService.list(filters);
       return { success: true, data: tasks };
     },
@@ -431,6 +562,26 @@ export function createRegistry(db: EvolveFlowDatabase): CapabilityRegistry {
     handler: async (input) => {
       const events = eventService.list(
         input.start && input.end ? { start: input.start as string, end: input.end as string } : undefined,
+      );
+      return { success: true, data: events };
+    },
+  });
+
+  registry.register({
+    name: 'event.find_conflicts',
+    domain: 'event',
+    description: '查找时间冲突',
+    inputSchema: {
+      type: 'object',
+      required: ['start_time', 'end_time'],
+      properties: { start_time: { type: 'string' }, end_time: { type: 'string' }, exclude_event_id: { type: 'string' } },
+    },
+    mutating: false,
+    handler: async (input) => {
+      const events = eventService.findConflicts(
+        input.start_time as string,
+        input.end_time as string,
+        input.exclude_event_id as string | undefined,
       );
       return { success: true, data: events };
     },
@@ -466,6 +617,275 @@ export function createRegistry(db: EvolveFlowDatabase): CapabilityRegistry {
       const value = preferenceService.get(input.key as string);
       return { success: true, data: value };
     },
+  });
+
+  registry.register({
+    name: 'dream.get_insights',
+    domain: 'dream',
+    description: '获取 Dream 系统洞察分析结果',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        limit: { type: 'number' },
+      },
+    },
+    mutating: false,
+    handler: async (input) => {
+      const limit = (input.limit as number) ?? 20;
+      const rows = database
+        .prepare(
+          `SELECT id, category, insight_text, confidence, supporting_data, created_at
+           FROM dream_insights
+           ORDER BY created_at DESC
+           LIMIT ?`,
+        )
+        .all(limit);
+      return { success: true, data: rows };
+    },
+  });
+
+  registry.register({
+    name: 'api_key.status',
+    domain: 'preference',
+    description: '检查 API Key 配置状态（不返回完整密钥）',
+    inputSchema: { type: 'object', properties: {} },
+    mutating: false,
+    handler: async () => {
+      const value = preferenceService.get('api_key');
+      const configured = !!value;
+      const prefix = value ? value.slice(0, 4) : '';
+      return { success: true, data: { configured, prefix } };
+    },
+  });
+
+  // ── AI capability stubs (handled by sidecar runtime) ──────────
+  registry.register({
+    name: 'ai.check_connectivity',
+    domain: 'ai',
+    description: '检查 AI 连接状态',
+    inputSchema: { type: 'object', properties: {} },
+    mutating: false,
+    handler: async () => ({ success: true, data: { connected: false, reason: 'Handled by runtime' } }),
+  });
+
+  registry.register({
+    name: 'ai.stream',
+    domain: 'ai',
+    description: '流式 AI 对话（实际由 sidecar 处理）',
+    inputSchema: { type: 'object', properties: { message: { type: 'string' }, session_id: { type: 'string' } } },
+    mutating: false,
+    handler: async () => ({ success: true, data: { streaming: true } }),
+  });
+
+  registry.register({
+    name: 'ai.chat',
+    domain: 'ai',
+    description: 'AI 对话（非流式）',
+    inputSchema: { type: 'object', properties: { message: { type: 'string' }, session_id: { type: 'string' } } },
+    mutating: false,
+    handler: async () => ({ success: true, data: { text: 'Handled by AI engine' } }),
+  });
+
+  registry.register({
+    name: 'ai.cancel_stream',
+    domain: 'ai',
+    description: '取消正在进行的 AI 流式响应',
+    inputSchema: { type: 'object', properties: { session_id: { type: 'string' } } },
+    mutating: false,
+    handler: async () => ({ success: true, data: { cancelled: true } }),
+  });
+
+  registry.register({
+    name: 'ai.get_context',
+    domain: 'ai',
+    description: '获取 AI 对话上下文',
+    inputSchema: { type: 'object', properties: {} },
+    mutating: false,
+    handler: async () => ({ success: true, data: { message: 'Handled by runtime' } }),
+  });
+
+  registry.register({
+    name: 'ai.delete_session',
+    domain: 'ai',
+    description: '删除 AI 对话会话',
+    inputSchema: { type: 'object', properties: { session_id: { type: 'string' } } },
+    mutating: false,
+    handler: async () => ({ success: true, data: { deleted: true } }),
+  });
+
+  // ── Dream capability stubs (handled by sidecar runtime) ──────
+  registry.register({
+    name: 'dream.run',
+    domain: 'dream',
+    description: '运行 Dream 分析引擎',
+    inputSchema: { type: 'object', properties: {} },
+    mutating: false,
+    handler: async () => ({ success: true, data: { status: 'completed', insights: [] } }),
+  });
+
+  registry.register({
+    name: 'dream.status',
+    domain: 'dream',
+    description: '获取 Dream 引擎运行状态',
+    inputSchema: { type: 'object', properties: {} },
+    mutating: false,
+    handler: async () => ({ success: true, data: { running: false, lastRun: null } }),
+  });
+
+  // ── Buddy capability stubs (handled by sidecar runtime) ──────
+  registry.register({
+    name: 'buddy.greet',
+    domain: 'buddy',
+    description: '获取 Buddy 问候语和当前状态',
+    inputSchema: { type: 'object', properties: {} },
+    mutating: false,
+    handler: async () => ({ success: true, data: { greeting: '你好！', mood: 'neutral', level: 'full' } }),
+  });
+
+  registry.register({
+    name: 'buddy.comment',
+    domain: 'buddy',
+    description: '获取 Buddy 对当前日程安排的评论',
+    inputSchema: { type: 'object', properties: { taskCount: { type: 'number' } } },
+    mutating: false,
+    handler: async (input) => {
+      const taskCount = (input.taskCount as number) || 0;
+      return { success: true, data: { comment: `今天有 ${taskCount} 项安排。`, mood: 'neutral' } };
+    },
+  });
+
+  // ── Reminder.list (real implementation) ─────────────────────
+  registry.register({
+    name: 'reminder.list',
+    domain: 'reminder',
+    description: '列出所有提醒',
+    inputSchema: { type: 'object', properties: {} },
+    mutating: false,
+    handler: async () => {
+      const rows = database.prepare('SELECT * FROM reminders ORDER BY created_at DESC').all() as Record<string, unknown>[];
+      const reminders = rows.map((r) => ({
+        id: r.id as string,
+        task_id: r.task_id as string | null,
+        event_id: r.event_id as string | null,
+        trigger_at: r.trigger_at as string,
+        snoozed_until: r.snoozed_until as string | null,
+        status: r.status as string,
+        message: r.message as string | null,
+        created_at: r.created_at as string,
+      }));
+      return { success: true, data: reminders };
+    },
+  });
+
+  // ── Backup capabilities (real implementations) ────────────
+  registry.register({
+    name: 'backup.list',
+    domain: 'backup',
+    description: '列出所有可用备份',
+    inputSchema: { type: 'object', properties: {} },
+    mutating: false,
+    handler: async () => {
+      if (!backupOutputDir || !fs.existsSync(backupOutputDir)) {
+        return { success: true, data: { backups: [], total_count: 0, total_size_bytes: 0 } };
+      }
+      const entries = fs.readdirSync(backupOutputDir, { withFileTypes: true });
+      const backupDirs = entries
+        .filter((e) => e.isDirectory() && e.name.startsWith('evolveflow-backup-'))
+        .map((e) => {
+          const fullPath = path.join(backupOutputDir, e.name);
+          const dbPath = path.join(fullPath, 'evolveflow.db');
+          const sizeBytes = fs.existsSync(dbPath) ? fs.statSync(dbPath).size : 0;
+          const date = e.name.replace('evolveflow-backup-', '').replace(/-/g, ':').replace(/T/g, ' ');
+          return {
+            path: fullPath,
+            name: e.name,
+            date,
+            size_bytes: sizeBytes,
+          };
+        });
+      backupDirs.sort((a, b) => b.date.localeCompare(a.date));
+      const totalCount = backupDirs.length;
+      const totalSizeBytes = backupDirs.reduce((sum, b) => sum + b.size_bytes, 0);
+      return { success: true, data: { backups: backupDirs, total_count: totalCount, total_size_bytes: totalSizeBytes } };
+    },
+  });
+
+  registry.register({
+    name: 'backup.create',
+    domain: 'backup',
+    description: '创建新备份',
+    inputSchema: { type: 'object', properties: {} },
+    mutating: true,
+    handler: wrapMutating('backup.create', async () => {
+      if (!backupService || !backupOutputDir) {
+        return { success: false, error: 'Backup service not available (dataDir not configured)' };
+      }
+      try {
+        const backupDir = backupService.backupTo(backupOutputDir);
+        const name = path.basename(backupDir);
+        return { success: true, data: { path: backupDir, name } };
+      } catch (e) {
+        return { success: false, error: (e as Error).message };
+      }
+    }),
+  });
+
+  registry.register({
+    name: 'backup.verify',
+    domain: 'backup',
+    description: '验证备份完整性',
+    inputSchema: { type: 'object', required: ['path'], properties: { path: { type: 'string' } } },
+    mutating: false,
+    handler: async (input) => {
+      if (!backupService) {
+        return { success: false, error: 'Backup service not available' };
+      }
+      try {
+        const valid = backupService.verifyBackup(input.path as string);
+        return { success: true, data: { valid, error: valid ? undefined : 'Backup verification failed' } };
+      } catch (e) {
+        return { success: true, data: { valid: false, error: (e as Error).message } };
+      }
+    },
+  });
+
+  registry.register({
+    name: 'backup.restore',
+    domain: 'backup',
+    description: '从备份恢复数据',
+    inputSchema: { type: 'object', required: ['path'], properties: { path: { type: 'string' } } },
+    mutating: true,
+    handler: async (input) => {
+      if (!backupService) {
+        return { success: false, error: 'Backup service not available' };
+      }
+      try {
+        backupService.restoreFrom(input.path as string);
+        return { success: true };
+      } catch (e) {
+        return { success: false, error: (e as Error).message };
+      }
+    },
+  });
+
+  registry.register({
+    name: 'backup.delete',
+    domain: 'backup',
+    description: '删除指定备份',
+    inputSchema: { type: 'object', required: ['path'], properties: { path: { type: 'string' } } },
+    mutating: true,
+    handler: wrapMutating('backup.delete', async (input) => {
+      const backupPath = input.path as string;
+      if (!backupPath || !fs.existsSync(backupPath)) {
+        return { success: false, error: 'Backup path not found' };
+      }
+      try {
+        fs.rmSync(backupPath, { recursive: true });
+        return { success: true };
+      } catch (e) {
+        return { success: false, error: (e as Error).message };
+      }
+    }),
   });
 
   return registry;

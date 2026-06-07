@@ -1,0 +1,267 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+  discussions: write
+
+env:
+  NODE_VERSION: 20
+  RUST_VERSION: 1.78.0
+
+jobs:
+  build:
+    name: Build Artifacts
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact-name: evolveflow-linux-amd64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact-name: evolveflow-windows-amd64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact-name: evolveflow-darwin-amd64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install system dependencies (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            python3 \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libgtk-3-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev
+
+      - name: Install system dependencies (macOS)
+        if: matrix.os == 'macos-latest'
+        run: brew install gtk+3
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build all packages
+        run: npm run build
+
+      # ----- Windows Code Signing -----
+      - name: Import Windows code signing certificate
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $pfxPath = "$env:RUNNER_TEMP\certificate.pfx"
+          $decoded = [Convert]::FromBase64String("$env:WINDOWS_CERTIFICATE")
+          [IO.File]::WriteAllBytes($pfxPath, $decoded)
+          Import-PfxCertificate -FilePath $pfxPath `
+            -CertStoreLocation Cert:\CurrentUser\My `
+            -Password (ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force)
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+
+      # ----- macOS Code Signing -----
+      - name: Import macOS code signing certificate
+        if: matrix.os == 'macos-latest'
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          echo "$MACOS_CERTIFICATE" | base64 --decode > /tmp/certificate.p12
+          security create-keychain -p temp build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p temp build.keychain
+          security import /tmp/certificate.p12 \
+            -k build.keychain \
+            -P "$MACOS_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s -k temp build.keychain
+
+      - name: Build Tauri app
+        run: npm run build -w @evolveflow/desktop-tauri
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      - name: Create Sentry release
+        if: env.SENTRY_AUTH_TOKEN != ''
+        uses: getsentry/action-release@v1
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
+          SENTRY_PROJECT: evolveflow
+        with:
+          environment: production
+          version: ${{ github.ref_name }}
+
+      # ----- Windows: Sign Installer -----
+      - name: Sign Windows installer
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $cert = Get-ChildItem -Path Cert:\CurrentUser\My -CodeSigningCert | Select-Object -First 1
+          if (-not $cert) {
+            Write-Warning "No code signing certificate found. Skipping Windows signing."
+            exit 0
+          }
+          $bundleDir = "apps\desktop-tauri\src-tauri\target\release\bundle"
+          $files = @(
+            "$bundleDir\msi\*.msi",
+            "$bundleDir\nsis\*.exe"
+          )
+          foreach ($pattern in $files) {
+            Get-ChildItem -Path $pattern -ErrorAction SilentlyContinue | ForEach-Object {
+              Write-Host "Signing: $($_.FullName)"
+              signtool sign `
+                /fd sha256 `
+                /tr "http://timestamp.digicert.com" `
+                /td sha256 `
+                /sha1 $cert.Thumbprint `
+                /v `
+                $_.FullName
+            }
+          }
+        env:
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+
+      # ----- macOS: Sign, Notarize, Staple -----
+      - name: Sign macOS app bundle
+        if: matrix.os == 'macos-latest'
+        run: |
+          APP_PATH="apps/desktop-tauri/src-tauri/target/release/bundle/dmg/EvolveFlow.app"
+          if [ ! -d "$APP_PATH" ]; then
+            APP_PATH="apps/desktop-tauri/src-tauri/target/release/bundle/macos/EvolveFlow.app"
+          fi
+          if [ -d "$APP_PATH" ]; then
+            codesign -s "${MACOS_SIGNING_IDENTITY}" \
+              --deep --force --verbose \
+              --options runtime \
+              --timestamp \
+              "$APP_PATH"
+            echo "Signed macOS app bundle at: $APP_PATH"
+          else
+            echo "Warning: macOS .app bundle not found. Skipping signing."
+          fi
+        env:
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY || '-' }}
+
+      - name: Notarize macOS app
+        if: matrix.os == 'macos-latest'
+        run: |
+          APP_PATH="apps/desktop-tauri/src-tauri/target/release/bundle/dmg/EvolveFlow.app"
+          if [ ! -d "$APP_PATH" ]; then
+            APP_PATH="apps/desktop-tauri/src-tauri/target/release/bundle/macos/EvolveFlow.app"
+          fi
+          if [ -d "$APP_PATH" ] && [ -n "${MACOS_NOTARY_APPLE_ID}" ]; then
+            echo "Creating archive for notarization..."
+            ditto -c -k --keepParent "$APP_PATH" "/tmp/EvolveFlow-notarize.zip"
+            xcrun notarytool submit "/tmp/EvolveFlow-notarize.zip" \
+              --apple-id "$MACOS_NOTARY_APPLE_ID" \
+              --team-id "$MACOS_NOTARY_TEAM_ID" \
+              --password "$MACOS_NOTARY_PASSWORD" \
+              --wait
+            echo "Stapling notarization ticket..."
+            xcrun stapler staple "$APP_PATH"
+            spctl -a -v "$APP_PATH"
+            echo "Notarization complete."
+          else
+            echo "Skipping notarization (no .app bundle found or missing notary credentials)."
+          fi
+        env:
+          MACOS_NOTARY_APPLE_ID: ${{ secrets.MACOS_NOTARY_APPLE_ID }}
+          MACOS_NOTARY_TEAM_ID: ${{ secrets.MACOS_NOTARY_TEAM_ID }}
+          MACOS_NOTARY_PASSWORD: ${{ secrets.MACOS_NOTARY_PASSWORD }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact-name }}
+          path: |
+            apps/desktop-tauri/src-tauri/target/release/bundle/**
+            apps/desktop-tauri/src-tauri/target/release/evolveflow*
+
+  build-cli:
+    name: Build CLI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build CLI
+        run: npm run build -w @evolveflow/cli
+
+      - name: Package CLI
+        run: |
+          mkdir -p dist-cli
+          cp -r packages/evolveflow-cli/dist dist-cli/
+          cp packages/evolveflow-cli/package.json dist-cli/
+
+      - name: Upload CLI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: evolveflow-cli
+          path: dist-cli/
+
+  create-release:
+    name: Create GitHub Release
+    needs: [build, build-cli]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Generate release notes
+        id: release_notes
+        run: |
+          echo "## Release ${{ github.ref_name }}" > release_notes.md
+          echo "" >> release_notes.md
+          echo "See [CHANGELOG.md](./CHANGELOG.md) for full release notes." >> release_notes.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Release ${{ github.ref_name }}
+          body_path: release_notes.md
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-alpha.') || contains(github.ref_name, '-beta.') || contains(github.ref_name, '-rc.') }}
+          files: |
+            artifacts/**/*

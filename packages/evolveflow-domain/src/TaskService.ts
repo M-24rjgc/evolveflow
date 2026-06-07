@@ -43,8 +43,11 @@ export class TaskService {
 
   getById(id: string): Task | null {
     const row = this.db.prepare('SELECT * FROM tasks WHERE id = ?').get(id) as Record<string, unknown> | undefined;
-    if (!row) return null;
-    return this.mapRowToTask(row);
+    if (!row) {return null;}
+    const tags = this.db.prepare('SELECT tag FROM task_tags WHERE task_id = ?').all(id) as { tag: string }[];
+    const tagsMap = new Map<string, string[]>();
+    tagsMap.set(id, tags.map((t) => t.tag));
+    return this.mapRowToTask(row, tagsMap);
   }
 
   list(filters?: { status?: TaskStatus; project?: string }): Task[] {
@@ -60,13 +63,15 @@ export class TaskService {
     }
     sql += ' ORDER BY sort_order, created_at';
     const rows = this.db.prepare(sql).all(...params) as Record<string, unknown>[];
-    return rows.map((r) => this.mapRowToTask(r));
+    const ids = rows.map((r) => r.id as string);
+    const tagsMap = this.batchFetchTags(ids);
+    return rows.map((r) => this.mapRowToTask(r, tagsMap));
   }
 
   update(input: UpdateTaskInput): Task {
     const existing = this.getById(input.task_id);
-    if (!existing) throw new Error(`Task not found: ${input.task_id}`);
-    if (existing.locked) throw new Error(`Task is locked: ${input.task_id}`);
+    if (!existing) {throw new Error(`Task not found: ${input.task_id}`);}
+    if (existing.locked) {throw new Error(`Task is locked: ${input.task_id}`);}
 
     const now = new Date().toISOString();
     const sets: string[] = ['updated_at = ?'];
@@ -99,7 +104,7 @@ export class TaskService {
 
   complete(taskId: string): Task {
     const existing = this.getById(taskId);
-    if (!existing) throw new Error(`Task not found: ${taskId}`);
+    if (!existing) {throw new Error(`Task not found: ${taskId}`);}
     const now = new Date().toISOString();
     this.db.prepare("UPDATE tasks SET status = 'completed', updated_at = ? WHERE id = ?").run(now, taskId);
     return this.getById(taskId)!;
@@ -107,23 +112,78 @@ export class TaskService {
 
   defer(taskId: string, newDueDate?: string): Task {
     const existing = this.getById(taskId);
-    if (!existing) throw new Error(`Task not found: ${taskId}`);
+    if (!existing) {throw new Error(`Task not found: ${taskId}`);}
     const now = new Date().toISOString();
-    this.db.prepare("UPDATE tasks SET status = 'deferred', due_date = ?, updated_at = ? WHERE id = ?").run(newDueDate ?? existing.due_date, now, taskId);
+    const dueDate = newDueDate ?? existing.due_date;
+
+    const deferTransaction = this.db.transaction(() => {
+      this.db.prepare("UPDATE tasks SET status = 'deferred', due_date = ?, updated_at = ? WHERE id = ?").run(dueDate, now, taskId);
+
+      // Cascade to non-completed, non-cancelled subtasks
+      const subtasks = this.getSubTasks(taskId);
+      const deferSubStmt = this.db.prepare("UPDATE tasks SET status = 'deferred', due_date = ?, updated_at = ? WHERE id = ? AND status != 'completed' AND status != 'cancelled'");
+      for (const sub of subtasks) {
+        if (sub.status !== 'completed' && sub.status !== 'cancelled') {
+          deferSubStmt.run(dueDate, now, sub.id);
+        }
+      }
+    });
+    deferTransaction();
+
     return this.getById(taskId)!;
   }
 
   lock(taskId: string, locked: boolean): Task {
     const existing = this.getById(taskId);
-    if (!existing) throw new Error(`Task not found: ${taskId}`);
+    if (!existing) {throw new Error(`Task not found: ${taskId}`);}
     const now = new Date().toISOString();
     this.db.prepare('UPDATE tasks SET locked = ?, updated_at = ? WHERE id = ?').run(locked ? 1 : 0, now, taskId);
     return this.getById(taskId)!;
   }
 
+  delete(id: string): void {
+    const existing = this.getById(id);
+    if (!existing) {throw new Error(`Task not found: ${id}`);}
+
+    const deleteTransaction = this.db.transaction(() => {
+      this.db.prepare('DELETE FROM task_tags WHERE task_id = ?').run(id);
+      this.db.prepare('DELETE FROM reminders WHERE task_id = ?').run(id);
+      this.db.prepare('DELETE FROM task_recurrence_rules WHERE task_id = ?').run(id);
+      this.db.prepare('DELETE FROM schedule_blocks WHERE task_id = ?').run(id);
+      this.db.prepare('DELETE FROM tasks WHERE id = ?').run(id);
+    });
+    deleteTransaction();
+  }
+
+  cancel(id: string): Task {
+    const existing = this.getById(id);
+    if (!existing) {throw new Error(`Task not found: ${id}`);}
+    const now = new Date().toISOString();
+    const result = this.db.prepare("UPDATE tasks SET status = 'cancelled', updated_at = ? WHERE id = ?").run(now, id);
+    if (result.changes === 0) {throw new Error(`Task not found: ${id}`);}
+    return this.getById(id)!;
+  }
+
+  search(query: string): Task[] {
+    const pattern = `%${query}%`;
+    const rows = this.db.prepare(
+      "SELECT * FROM tasks WHERE title LIKE ? OR description LIKE ? ORDER BY sort_order, created_at"
+    ).all(pattern, pattern) as Record<string, unknown>[];
+    const ids = rows.map((r) => r.id as string);
+    const tagsMap = this.batchFetchTags(ids);
+    return rows.map((r) => this.mapRowToTask(r, tagsMap));
+  }
+
+  setSortOrder(id: string, order: number): void {
+    const now = new Date().toISOString();
+    this.db.prepare('UPDATE tasks SET sort_order = ?, updated_at = ? WHERE id = ?').run(order, now, id);
+  }
+
   getSubTasks(parentTaskId: string): Task[] {
     const rows = this.db.prepare('SELECT * FROM tasks WHERE parent_task_id = ? ORDER BY sort_order').all(parentTaskId) as Record<string, unknown>[];
-    return rows.map((r) => this.mapRowToTask(r));
+    const ids = rows.map((r) => r.id as string);
+    const tagsMap = this.batchFetchTags(ids);
+    return rows.map((r) => this.mapRowToTask(r, tagsMap));
   }
 
   expandRecurring(fromDate: string, toDate: string): Task[] {
@@ -134,17 +194,19 @@ export class TaskService {
 
     for (const rule of rules) {
       const task = this.getById(rule.task_id as string);
-      if (!task) continue;
+      if (!task) {continue;}
 
-      const interval = (rule.interval_val as number) || 1;
+      let interval = (rule.interval_val as number) || 1;
+      // Validate interval: negative values cause an infinite loop since currentDate moves backwards
+      if (interval <= 0) {interval = 1;}
       const frequency = rule.frequency as string;
       const endDate = rule.end_date ? new Date(rule.end_date as string) : null;
       const daysOfWeek = (rule.days_of_week as string)?.split(',').map((d) => parseInt(d.trim(), 10)) || [];
 
-      let currentDate = new Date(from);
+      const currentDate = new Date(from);
 
       while (currentDate <= to) {
-        if (endDate && currentDate > endDate) break;
+        if (endDate && currentDate > endDate) {break;}
 
         let shouldExpand = false;
         if (frequency === 'daily') {
@@ -195,8 +257,30 @@ export class TaskService {
     return expanded;
   }
 
-  private mapRowToTask(row: Record<string, unknown>): Task {
-    const tags = this.db.prepare('SELECT tag FROM task_tags WHERE task_id = ?').all(row.id as string) as { tag: string }[];
+  private batchFetchTags(taskIds: string[]): Map<string, string[]> {
+    const map = new Map<string, string[]>();
+    for (const id of taskIds) {
+      map.set(id, []);
+    }
+    if (taskIds.length === 0) {return map;}
+
+    const placeholders = taskIds.map(() => '?').join(',');
+    const rows = this.db.prepare(`SELECT task_id, tag FROM task_tags WHERE task_id IN (${placeholders})`).all(...taskIds) as { task_id: string; tag: string }[];
+    for (const row of rows) {
+      const tags = map.get(row.task_id);
+      if (tags) {tags.push(row.tag);}
+    }
+    return map;
+  }
+
+  private mapRowToTask(row: Record<string, unknown>, tagsMap?: Map<string, string[]>): Task {
+    let tagArray: string[];
+    if (tagsMap) {
+      tagArray = tagsMap.get(row.id as string) ?? [];
+    } else {
+      const rawTags = this.db.prepare('SELECT tag FROM task_tags WHERE task_id = ?').all(row.id as string) as { tag: string }[];
+      tagArray = rawTags.map((t) => t.tag);
+    }
     return {
       id: row.id as string,
       title: row.title as string,
@@ -208,7 +292,7 @@ export class TaskService {
       locked: Boolean(row.locked),
       parent_task_id: (row.parent_task_id as string) ?? null,
       project: (row.project as string) ?? null,
-      tags: tags.map((t) => t.tag),
+      tags: tagArray,
       sort_order: (row.sort_order as number) ?? 0,
       created_at: row.created_at as string,
       updated_at: row.updated_at as string,

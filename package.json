@@ -3,15 +3,40 @@
   "private": true,
   "workspaces": [
     "packages/*",
-    "apps/*"
+    "apps/*",
+    "runtime"
   ],
   "scripts": {
-    "build": "npm run build --workspaces",
-    "lint": "npm run lint --workspaces",
-    "test": "npm run test --workspaces"
+    "build": "npm run build -w @evolveflow/storage && npm run build -w @evolveflow/domain && npm run build -w @evolveflow/capabilities && npm run build -w @evolveflow/runtime && npm run build -w @evolveflow/cli && npm run build -w @evolveflow/ui-shared && npm run build -w @evolveflow/desktop-tauri",
+    "lint": "npm run lint --workspaces --if-present",
+    "lint:fix": "npm run lint:fix --workspaces --if-present",
+    "format": "prettier --check .",
+    "format:fix": "prettier --write .",
+    "test": "npm run test --workspaces --if-present",
+    "test:coverage": "vitest run --coverage",
+    "test:watch": "vitest --workspace",
+    "bench": "vitest bench",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "prepare": "husky"
+  },
+  "lint-staged": {
+    "*.ts": [
+      "eslint --fix",
+      "prettier --write"
+    ],
+    "*.{json,md,css,html}": [
+      "prettier --write"
+    ]
   },
   "devDependencies": {
+    "@typescript-eslint/eslint-plugin": "^7.0.0",
+    "@typescript-eslint/parser": "^7.0.0",
+    "@vitest/coverage-v8": "^1.6.0",
+    "eslint": "^8.57.0",
+    "husky": "^9.0.0",
+    "lint-staged": "^15.2.0",
+    "prettier": "^3.2.0",
     "typescript": "^5.4.0",
-    "prettier": "^3.2.0"
+    "vitest": "^1.6.0"
   }
 }

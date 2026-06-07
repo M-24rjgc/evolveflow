@@ -1,11 +1,11 @@
 {
   "productName": "EvolveFlow",
   "version": "0.1.0",
-  "identifier": "com.evolveflow.app",
+  "identifier": "com.evolveflow.desktop",
   "build": {
-    "beforeDevCommand": "npm run dev",
+    "beforeDevCommand": "npm run build -w @evolveflow/runtime && npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "npm run build -w @evolveflow/storage && npm run build -w @evolveflow/domain && npm run build -w @evolveflow/capabilities && npm run build -w @evolveflow/runtime && npm run prepare:resources && npm run build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -31,6 +31,9 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "resources": [
+      "resources/**/*"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -38,5 +41,13 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "active": true,
+      "endpoints": ["https://github.com/m-24rjgc/evolveflow/releases/latest/download/latest.json"],
+      "dialog": true,
+      "pubkey": "PLACEHOLDER_GENERATE_WITH_TAURI_SIGNER"
+    }
   }
 }

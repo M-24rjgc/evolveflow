@@ -22,23 +22,29 @@ export class SummaryService {
     this.taskService = taskService;
   }
 
-  generateDaily(date: string): DailySummary {
-    const existing = this.getByDate(date);
-    if (existing) return existing;
+  generateDaily(date: string, forceRefresh: boolean = false): DailySummary {
+    if (!forceRefresh) {
+      const existing = this.getByDate(date);
+      if (existing) {return existing;}
+    }
 
-    const dayStart = new Date(`${date}T00:00:00`);
-    const dayEnd = new Date(`${date}T23:59:59`);
-    const dayStartISO = dayStart.toISOString();
-    const dayEndISO = dayEnd.toISOString();
+    // Use local date strings instead of Date objects to avoid UTC conversion issues.
+    // For example, in UTC+8, midnight local time is 16:00 UTC the previous day.
+    // Using local date strings ensures we query the correct local day boundaries.
+    const dayStartISO = `${date}T00:00:00`;
+    const dayEndISO = `${date}T23:59:59`;
+    const todayStr = new Date().toISOString().split('T')[0];
 
     const completedTasks = (this.db.prepare(
       "SELECT title FROM tasks WHERE status = 'completed' AND updated_at >= ? AND updated_at <= ?"
     ).all(dayStartISO, dayEndISO) as { title: string }[]).map((r) => r.title);
 
+    // Include tasks with due_date matching today AND tasks with no due_date that were created today
     const incompleteTasks = (this.db.prepare(
-      "SELECT title FROM tasks WHERE status = 'pending' AND due_date IS NOT NULL AND due_date >= ? AND due_date <= ?"
-    ).all(dayStartISO, dayEndISO) as { title: string }[]).map((r) => r.title);
+      "SELECT title FROM tasks WHERE status = 'pending' AND ((due_date IS NOT NULL AND substr(due_date, 1, 10) = ?) OR (due_date IS NULL AND substr(created_at, 1, 10) = ?))"
+    ).all(date, date) as { title: string }[]).map((r) => r.title);
 
+    // Use local date strings for deferred tasks as well
     const deferredTasks = (this.db.prepare(
       "SELECT title FROM tasks WHERE status = 'deferred' AND updated_at >= ? AND updated_at <= ?"
     ).all(dayStartISO, dayEndISO) as { title: string }[]).map((r) => r.title);
@@ -75,7 +81,7 @@ export class SummaryService {
 
   getByDate(date: string): DailySummary | null {
     const row = this.db.prepare('SELECT * FROM daily_summaries WHERE date = ?').get(date) as Record<string, unknown> | undefined;
-    if (!row) return null;
+    if (!row) {return null;}
     return {
       id: row.id as string,
       date: row.date as string,

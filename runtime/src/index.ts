@@ -2,6 +2,6 @@ export { CAPABILITIES, CAPABILITY_NAMES, getCapability, isMutatingCapability } f
 export type { CapabilityDefinition } from './capabilities.js';
 export { getScheduleSkillPrompt } from './skills/schedule-skill.js';
 export { DreamOrchestrator } from './dream.js';
-export type { DreamConfig, DreamResult } from './dream.js';
+export type { DreamConfig, DreamRunResult, DreamAnalysisResult, DreamInsight, DreamPreferences, DreamData } from './dream.js';
 export { BuddyCore, BuddyCliRenderer } from './buddy.js';
 export type { BuddyLevel, BuddyState } from './buddy.js';

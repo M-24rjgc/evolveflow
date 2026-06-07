@@ -41,6 +41,7 @@ const program = new Command();
 program.name('evolveflow').description('EvolveFlow 智能日程助手 CLI').version('0.1.0');
 
 const jsonFlag = '--json';
+const cliAiContext = { actor: 'ai' as const, origin: 'cli' as const };
 
 program
   .command('task')
@@ -64,7 +65,7 @@ program
           tags: opts.tags ? opts.tags.split(',') : undefined,
           project: opts.project,
         }, { actor: 'cli', origin: 'cli' });
-        if (opts.json) outputJson(result); else outputHuman(result.data);
+        if (opts.json) {outputJson(result);} else {outputHuman(result.data);}
         db.close();
       })
   )
@@ -89,7 +90,7 @@ program
           tags: opts.tags ? opts.tags.split(',') : undefined,
           project: opts.project,
         }, { actor: 'cli', origin: 'cli' });
-        if (opts.json) outputJson(result); else outputHuman(result.data);
+        if (opts.json) {outputJson(result);} else {outputHuman(result.data);}
         db.close();
       })
   )
@@ -104,7 +105,7 @@ program
         const result = await registry.invoke('task.list', {
           status: opts.status,
         }, { actor: 'cli', origin: 'cli' });
-        if (opts.json) outputJson(result); else outputHuman(result.data);
+        if (opts.json) {outputJson(result);} else {outputHuman(result.data);}
         db.close();
       })
   )
@@ -117,7 +118,7 @@ program
         const db = getDb();
         const registry = createRegistry(db);
         const result = await registry.invoke('task.complete', { task_id: opts.id }, { actor: 'cli', origin: 'cli' });
-        if (opts.json) outputJson(result); else outputHuman(result.data);
+        if (opts.json) {outputJson(result);} else {outputHuman(result.data);}
         db.close();
       })
   );
@@ -140,7 +141,7 @@ program
           start_time: opts.start,
           end_time: opts.end,
         }, { actor: 'cli', origin: 'cli' });
-        if (opts.json) outputJson(result); else outputHuman(result.data);
+        if (opts.json) {outputJson(result);} else {outputHuman(result.data);}
         db.close();
       })
   )
@@ -161,7 +162,7 @@ program
           start_time: opts.start,
           end_time: opts.end,
         }, { actor: 'cli', origin: 'cli' });
-        if (opts.json) outputJson(result); else outputHuman(result.data);
+        if (opts.json) {outputJson(result);} else {outputHuman(result.data);}
         db.close();
       })
   );
@@ -190,7 +191,7 @@ program
             date: opts.date ?? new Date().toISOString().split('T')[0],
           }, { actor: 'cli', origin: 'cli' });
         }
-        if (opts.json) outputJson(result); else outputHuman(result.data);
+        if (opts.json) {outputJson(result);} else {outputHuman(result.data);}
         db.close();
       })
   );
@@ -206,7 +207,7 @@ program
     const result = await registry.invoke('history.list_actions', {
       limit: parseInt(opts.limit),
     }, { actor: 'cli', origin: 'cli' });
-    if (opts.json) outputJson(result); else outputHuman(result.data);
+    if (opts.json) {outputJson(result);} else {outputHuman(result.data);}
     db.close();
   });
 
@@ -226,18 +227,18 @@ program
       if (lower.includes('创建任务') || lower.includes('添加任务') || lower.includes('新建任务')) {
         const titleMatch = message.match(/(?:创建|添加|新建)(?:任务|一个任务)[：:]?\s*(.+)/);
         const title = titleMatch ? titleMatch[1].trim() : message;
-        result = await registry.invoke('task.create', { title }, { actor: 'cli-ai', origin: 'cli-ai' });
+        result = await registry.invoke('task.create', { title }, cliAiContext);
       } else if (lower.includes('查看任务') || lower.includes('任务列表') || lower.includes('所有任务')) {
-        result = await registry.invoke('task.list', {}, { actor: 'cli-ai', origin: 'cli-ai' });
+        result = await registry.invoke('task.list', {}, cliAiContext);
       } else if (lower.includes('排程') || lower.includes('安排')) {
-        result = await registry.invoke('schedule.plan_day', { date: new Date().toISOString().split('T')[0] }, { actor: 'cli-ai', origin: 'cli-ai' });
+        result = await registry.invoke('schedule.plan_day', { date: new Date().toISOString().split('T')[0] }, cliAiContext);
       } else if (lower.includes('历史') || lower.includes('记录')) {
-        result = await registry.invoke('history.list_actions', { limit: 20 }, { actor: 'cli-ai', origin: 'cli-ai' });
+        result = await registry.invoke('history.list_actions', { limit: 20 }, cliAiContext);
       } else {
         result = { success: false, message: '无法理解该命令。支持的操作：创建任务、查看任务、排程、查看历史记录' };
       }
 
-      if (opts.json) outputJson(result);
+      if (opts.json) {outputJson(result);}
       else {
         if (result.success) {
           outputHuman(result.data || result);
@@ -247,7 +248,7 @@ program
       }
     } catch (err) {
       console.error('AI command error:', err);
-      if (!opts.json) console.log('执行 AI 命令时出错，请稍后重试');
+      if (!opts.json) {console.log('执行 AI 命令时出错，请稍后重试');}
     }
 
     db.close();

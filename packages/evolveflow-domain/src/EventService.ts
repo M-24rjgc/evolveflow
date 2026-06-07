@@ -10,6 +10,10 @@ export class EventService {
   }
 
   create(input: CreateEventInput): Event {
+    if (new Date(input.start_time) >= new Date(input.end_time)) {
+      throw new Error(`Event start_time (${input.start_time}) must be before end_time (${input.end_time})`);
+    }
+
     const id = uuidv4();
     const now = new Date().toISOString();
 
@@ -32,7 +36,7 @@ export class EventService {
 
   getById(id: string): Event | null {
     const row = this.db.prepare('SELECT * FROM events WHERE id = ?').get(id) as Record<string, unknown> | undefined;
-    if (!row) return null;
+    if (!row) {return null;}
     return this.mapRowToEvent(row);
   }
 
@@ -50,8 +54,15 @@ export class EventService {
 
   update(input: UpdateEventInput): Event {
     const existing = this.getById(input.event_id);
-    if (!existing) throw new Error(`Event not found: ${input.event_id}`);
-    if (existing.locked) throw new Error(`Event is locked: ${input.event_id}`);
+    if (!existing) {throw new Error(`Event not found: ${input.event_id}`);}
+    if (existing.locked) {throw new Error(`Event is locked: ${input.event_id}`);}
+
+    // Determine effective start_time and end_time for validation
+    const effectiveStart = input.start_time ?? existing.start_time;
+    const effectiveEnd = input.end_time ?? existing.end_time;
+    if (new Date(effectiveStart) >= new Date(effectiveEnd)) {
+      throw new Error(`Event start_time (${effectiveStart}) must be before end_time (${effectiveEnd})`);
+    }
 
     const now = new Date().toISOString();
     const sets: string[] = ['updated_at = ?'];
@@ -68,10 +79,36 @@ export class EventService {
     return this.getById(input.event_id)!;
   }
 
+  delete(id: string): void {
+    const existing = this.getById(id);
+    if (!existing) {throw new Error(`Event not found: ${id}`);}
+    if (existing.locked) {throw new Error('Cannot delete locked event');}
+
+    const deleteTransaction = this.db.transaction(() => {
+      this.db.prepare('DELETE FROM event_recurrence_rules WHERE event_id = ?').run(id);
+      this.db.prepare('DELETE FROM reminders WHERE event_id = ?').run(id);
+      this.db.prepare('DELETE FROM schedule_blocks WHERE event_id = ?').run(id);
+      this.db.prepare('DELETE FROM events WHERE id = ?').run(id);
+    });
+    deleteTransaction();
+  }
+
   lock(eventId: string, locked: boolean): Event {
     const now = new Date().toISOString();
     this.db.prepare('UPDATE events SET locked = ?, updated_at = ? WHERE id = ?').run(locked ? 1 : 0, now, eventId);
     return this.getById(eventId)!;
+  }
+
+  findConflicts(startTime: string, endTime: string, excludeEventId?: string): Event[] {
+    let sql = 'SELECT * FROM events WHERE start_time < ? AND end_time > ?';
+    const params: unknown[] = [endTime, startTime];
+    if (excludeEventId) {
+      sql += ' AND id != ?';
+      params.push(excludeEventId);
+    }
+    sql += ' ORDER BY start_time';
+    const rows = this.db.prepare(sql).all(...params) as Record<string, unknown>[];
+    return rows.map((r) => this.mapRowToEvent(r));
   }
 
   expandRecurring(fromDate: string, toDate: string): Event[] {
@@ -82,19 +119,21 @@ export class EventService {
 
     for (const rule of rules) {
       const event = this.getById(rule.event_id as string);
-      if (!event) continue;
+      if (!event) {continue;}
 
-      const interval = (rule.interval_val as number) || 1;
+      let interval = (rule.interval_val as number) || 1;
+      // Validate interval: negative values cause an infinite loop since currentDate moves backwards
+      if (interval <= 0) {interval = 1;}
       const frequency = rule.frequency as string;
       const endDate = rule.end_date ? new Date(rule.end_date as string) : null;
       const daysOfWeek = (rule.days_of_week as string)?.split(',').map((d) => parseInt(d.trim(), 10)) || [];
       const eventStart = new Date(event.start_time);
       const durationMs = new Date(event.end_time).getTime() - eventStart.getTime();
 
-      let currentDate = new Date(from);
+      const currentDate = new Date(from);
 
       while (currentDate <= to) {
-        if (endDate && currentDate > endDate) break;
+        if (endDate && currentDate > endDate) {break;}
 
         let shouldExpand = false;
         if (frequency === 'daily') {

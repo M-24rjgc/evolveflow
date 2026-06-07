@@ -5,11 +5,16 @@
   "main": "./dist/sidecar.js",
   "scripts": {
     "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src --ext .ts",
+    "lint:fix": "eslint src --ext .ts --fix",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "sidecar": "node dist/sidecar.js",
     "dev": "tsx src/sidecar.ts"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.30.0"
+    "@sentry/node": "^8.0.0"
   },
   "devDependencies": {
     "tsx": "^4.7.0",

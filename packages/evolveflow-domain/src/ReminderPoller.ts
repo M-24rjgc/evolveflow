@@ -18,6 +18,8 @@ export class ReminderPoller {
   private db: Database.Database;
   private lastPollTime: Date = new Date();
   private checkIntervalMs: number;
+  private intervalId: ReturnType<typeof setInterval> | null = null;
+  private lastTriggeredDate: string | null = null;
 
   constructor(db: Database.Database, checkIntervalMs: number = 10000) {
     this.db = db;
@@ -27,8 +29,8 @@ export class ReminderPoller {
   pollDueReminders(): PolledReminder[] {
     const now = new Date().toISOString();
     const rows = this.db.prepare(
-      "SELECT * FROM reminders WHERE status = 'pending' AND trigger_at <= ? AND trigger_at > ?"
-    ).all(now, this.lastPollTime.toISOString()) as Record<string, unknown>[];
+      "SELECT * FROM reminders WHERE status = 'pending' AND trigger_at <= ?"
+    ).all(now) as Record<string, unknown>[];
 
     this.lastPollTime = new Date();
 
@@ -59,7 +61,7 @@ export class ReminderPoller {
       const existing = this.db.prepare(
         "SELECT 1 FROM reminders WHERE task_id = ? AND message LIKE '催办%' AND status = 'pending'"
       ).get(task.id as string);
-      if (existing) continue;
+      if (existing) {continue;}
 
       const dueDate = new Date(task.due_date as string);
       const overdueMinutes = Math.floor((Date.now() - dueDate.getTime()) / 60000);
@@ -91,6 +93,68 @@ export class ReminderPoller {
 
   shouldTriggerDailySummary(): boolean {
     const now = new Date();
-    return now.getHours() === 23 && now.getMinutes() === 0;
+    const todayStr = now.toISOString().split('T')[0];
+
+    // Only fire if the stored date is different from today's date
+    if (this.lastTriggeredDate === todayStr) {
+      return false;
+    }
+
+    if (now.getHours() === 23 && now.getMinutes() === 0) {
+      this.lastTriggeredDate = todayStr;
+      return true;
+    }
+
+    return false;
+  }
+
+  /**
+   * Clean up triggered/dismissed reminders older than 7 days.
+   * Should be called once per day from the poll cycle.
+   */
+  cleanupOldReminders(): void {
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - 7);
+    const cutoffISO = cutoff.toISOString();
+
+    const result = this.db.prepare(
+      "DELETE FROM reminders WHERE status IN ('triggered', 'dismissed') AND trigger_at < ?"
+    ).run(cutoffISO);
+
+    if (result.changes > 0) {
+      console.log(`Cleaned up ${result.changes} old reminder(s)`);
+    }
+  }
+
+  /**
+   * Start the polling interval. Returns the interval ID for cleanup.
+   */
+  start(pollCallback?: () => void): void {
+    if (this.intervalId !== null) {
+      return; // Already running
+    }
+    this.intervalId = setInterval(() => {
+      if (pollCallback) {
+        pollCallback();
+      }
+    }, this.checkIntervalMs);
+  }
+
+  /**
+   * Stop the polling interval to prevent memory leaks.
+   */
+  stop(): void {
+    if (this.intervalId !== null) {
+      clearInterval(this.intervalId);
+      this.intervalId = null;
+    }
+  }
+
+  /**
+   * Full cleanup: stop timer, release references.
+   */
+  dispose(): void {
+    this.stop();
+    this.lastTriggeredDate = null;
   }
 }
