@@ -6,12 +6,21 @@ import * as readline from 'readline';
 let _sentryCaptureException: (err: unknown, opts?: Record<string, unknown>) => void = () => {};
 const SENTRY_DSN = process.env.EVOLVEFLOW_SENTRY_DSN || '';
 if (SENTRY_DSN) {
-  import('@sentry/node').then((Sentry) => {
-    Sentry.init({ dsn: SENTRY_DSN, tracesSampleRate: 0.1, environment: process.env.NODE_ENV || 'production' });
-    _sentryCaptureException = (err, opts) => Sentry.captureException(err, opts as Parameters<typeof Sentry.captureException>[1]);
-  }).catch(() => {});
+  import('@sentry/node')
+    .then((Sentry) => {
+      Sentry.init({
+        dsn: SENTRY_DSN,
+        tracesSampleRate: 0.1,
+        environment: process.env.NODE_ENV || 'production',
+      });
+      _sentryCaptureException = (err, opts) =>
+        Sentry.captureException(err, opts as Parameters<typeof Sentry.captureException>[1]);
+    })
+    .catch(() => {});
 }
-function captureException(err: unknown, opts?: Record<string, unknown>) { _sentryCaptureException(err, opts); }
+function captureException(err: unknown, opts?: Record<string, unknown>) {
+  _sentryCaptureException(err, opts);
+}
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
@@ -21,6 +30,15 @@ import { createRegistry } from '@evolveflow/capabilities';
 
 // ── AI Engine ────────────────────────────────────────────────
 import { ApiClient, ApiError } from './ai/client.js';
+import {
+  DEEPSEEK_ANTHROPIC_BASE_URL,
+  DEEPSEEK_MODEL,
+  DEEPSEEK_MODEL_DISPLAY,
+  DEEPSEEK_PROVIDER,
+  getThinkingForMode,
+  getEnvDeepSeekApiKey,
+  type AgentMode,
+} from './ai/deepseek.js';
 import { capabilitiesToTools, getToolListingPrompt } from './ai/tools.js';
 import {
   runConversation,
@@ -75,27 +93,69 @@ type Message = JsonRpcRequest | JsonRpcNotification;
 // ── Allowed Capabilities ─────────────────────────────────────
 
 const ALLOWED_CAPABILITIES = new Set([
-  'task.create', 'task.update', 'task.complete', 'task.defer', 'task.lock', 'task.delete', 'task.cancel',
-  'event.create', 'event.update', 'event.lock', 'event.delete', 'event.find_conflicts',
-  'schedule.plan_day', 'schedule.plan_range', 'schedule.rebalance', 'schedule.get_blocks', 'schedule.explain', 'schedule.analyze_quality',
+  'task.create',
+  'task.update',
+  'task.complete',
+  'task.defer',
+  'task.lock',
+  'task.delete',
+  'task.cancel',
+  'event.create',
+  'event.update',
+  'event.lock',
+  'event.delete',
+  'event.find_conflicts',
+  'schedule.plan_day',
+  'schedule.plan_range',
+  'schedule.rebalance',
+  'schedule.clear_day',
+  'schedule.get_blocks',
+  'schedule.explain',
+  'schedule.analyze_quality',
   'reminder.snooze',
   'summary.generate_daily',
   'history.list_actions',
   'undo.revert_action',
-  'memory.clear_ai_history', 'memory.clear_learned_state',
-  'heartbeat', 'shutdown', 'rebuild_state',
-  'task.list', 'event.list', 'preference.set', 'preference.get', 'api_key.status',
+  'memory.clear_ai_history',
+  'memory.clear_learned_state',
+  'heartbeat',
+  'shutdown',
+  'rebuild_state',
+  'task.list',
+  'event.list',
+  'preference.set',
+  'preference.get',
+  'api_key.status',
+  'file.list',
+  'file.read',
+  'file.search',
+  'file.write',
+  'terminal.run',
   // AI methods
-  'ai.chat', 'ai.stream', 'ai.get_sessions', 'ai.delete_session',
-  'ai.get_context', 'ai.check_connectivity', 'ai.cancel_stream', 'ai.suggest_today',
+  'ai.chat',
+  'ai.stream',
+  'ai.get_sessions',
+  'ai.delete_session',
+  'ai.get_context',
+  'ai.check_connectivity',
+  'ai.cancel_stream',
+  'ai.approve_tool',
+  'ai.suggest_today',
   // Dream methods
-  'dream.run', 'dream.status', 'dream.get_insights',
+  'dream.run',
+  'dream.status',
+  'dream.get_insights',
   // Reminder methods
   'reminder.list',
   // Backup methods
-  'backup.list', 'backup.create', 'backup.verify', 'backup.restore', 'backup.delete',
+  'backup.list',
+  'backup.create',
+  'backup.verify',
+  'backup.restore',
+  'backup.delete',
   // Buddy methods
-  'buddy.greet', 'buddy.comment',
+  'buddy.greet',
+  'buddy.comment',
 ]);
 
 // ── Global State ─────────────────────────────────────────────
@@ -106,13 +166,30 @@ let _aiClient: ApiClient | null = null;
 let _aiTools: AnthropicTool[] = [];
 let _aiSystemPrompt: SystemMessageParam[] = [];
 let _lastConnectivityCheckAt = 0;
-let _lastConnectivityResult: { connected: boolean; reason?: string } = { connected: false, reason: 'not checked' };
+let _lastConnectivityResult: { connected: boolean; reason?: string } = {
+  connected: false,
+  reason: 'not checked',
+};
 
-let reminderQueue: Array<{ id: string; triggerAt: string; message: string | null; taskId: string | null }> = [];
+let reminderQueue: Array<{
+  id: string;
+  triggerAt: string;
+  message: string | null;
+  taskId: string | null;
+}> = [];
 let pendingTaskIds: string[] = [];
+
+const AGENT_MODES = new Set<AgentMode>(['chat', 'plan', 'auto', 'yolo']);
 
 // ── Stream Lifecycle Management ───────────────────────────────
 const streamControllers = new Map<string, AbortController>();
+const pendingToolApprovals = new Map<
+  string,
+  {
+    resolve: (allow: boolean) => void;
+    timeout: ReturnType<typeof setTimeout>;
+  }
+>();
 
 // ── Dream Orchestrator ────────────────────────────────────────
 let _dreamOrchestrator: DreamOrchestrator | null = null;
@@ -144,7 +221,9 @@ async function handleMessage(msg: Message): Promise<JsonRpcResponse | null> {
   // ── System methods ──────────────────────────────
   if (method === 'heartbeat') {
     return {
-      jsonrpc: '2.0', id: request.id, request_id: requestId,
+      jsonrpc: '2.0',
+      id: request.id,
+      request_id: requestId,
       result: {
         status: 'alive',
         timestamp: Date.now(),
@@ -159,24 +238,43 @@ async function handleMessage(msg: Message): Promise<JsonRpcResponse | null> {
     sendNotification('system.shutting_down', { timestamp: Date.now() });
     setTimeout(() => process.exit(0), 100);
     return {
-      jsonrpc: '2.0', id: request.id, request_id: requestId,
+      jsonrpc: '2.0',
+      id: request.id,
+      request_id: requestId,
       result: { status: 'shutting_down' },
     };
   }
 
   if (method === 'rebuild_state') {
-    const data = params as {
-      reminders?: Array<{ id: string; triggerAt: string; message: string | null; taskId: string | null }>;
-      pendingTaskIds?: string[];
-    } | undefined;
-    if (data?.reminders) {reminderQueue = data.reminders;}
-    if (data?.pendingTaskIds) {pendingTaskIds = data.pendingTaskIds;}
-    sendNotification('state.rebuilt', {
-      reminderCount: reminderQueue.length,
-      pendingTaskCount: pendingTaskIds.length,
-    }, requestId);
+    const data = params as
+      | {
+          reminders?: Array<{
+            id: string;
+            triggerAt: string;
+            message: string | null;
+            taskId: string | null;
+          }>;
+          pendingTaskIds?: string[];
+        }
+      | undefined;
+    if (data?.reminders) {
+      reminderQueue = data.reminders;
+    }
+    if (data?.pendingTaskIds) {
+      pendingTaskIds = data.pendingTaskIds;
+    }
+    sendNotification(
+      'state.rebuilt',
+      {
+        reminderCount: reminderQueue.length,
+        pendingTaskCount: pendingTaskIds.length,
+      },
+      requestId
+    );
     return {
-      jsonrpc: '2.0', id: request.id, request_id: requestId,
+      jsonrpc: '2.0',
+      id: request.id,
+      request_id: requestId,
       result: {
         status: 'state_rebuilt',
         reminderCount: reminderQueue.length,
@@ -204,7 +302,9 @@ async function handleMessage(msg: Message): Promise<JsonRpcResponse | null> {
       totalOutputTokens: s.totalTokens.output_tokens,
     }));
     return {
-      jsonrpc: '2.0', id: request.id, request_id: requestId,
+      jsonrpc: '2.0',
+      id: request.id,
+      request_id: requestId,
       result: { sessions },
     };
   }
@@ -215,7 +315,9 @@ async function handleMessage(msg: Message): Promise<JsonRpcResponse | null> {
       deleteSession(sessionId);
     }
     return {
-      jsonrpc: '2.0', id: request.id, request_id: requestId,
+      jsonrpc: '2.0',
+      id: request.id,
+      request_id: requestId,
       result: { deleted: !!sessionId },
     };
   }
@@ -223,14 +325,19 @@ async function handleMessage(msg: Message): Promise<JsonRpcResponse | null> {
   if (method === 'ai.get_context') {
     if (!_db || !_registry) {
       return {
-        jsonrpc: '2.0', id: request.id, request_id: requestId, trace_id: traceId,
+        jsonrpc: '2.0',
+        id: request.id,
+        request_id: requestId,
+        trace_id: traceId,
         error: { code: -32000, message: 'Database not initialized' },
       };
     }
     try {
       const ctx = await buildConversationContext(_db, _registry);
       return {
-        jsonrpc: '2.0', id: request.id, request_id: requestId,
+        jsonrpc: '2.0',
+        id: request.id,
+        request_id: requestId,
         result: ctx,
       };
     } catch (err) {
@@ -239,7 +346,10 @@ async function handleMessage(msg: Message): Promise<JsonRpcResponse | null> {
         tags: { trace_id: traceId, method: 'ai.get_context', source: 'handleMessage' },
       });
       return {
-        jsonrpc: '2.0', id: request.id, request_id: requestId, trace_id: traceId,
+        jsonrpc: '2.0',
+        id: request.id,
+        request_id: requestId,
+        trace_id: traceId,
         error: { code: -32000, message: err instanceof Error ? err.message : String(err) },
       };
     }
@@ -248,7 +358,9 @@ async function handleMessage(msg: Message): Promise<JsonRpcResponse | null> {
   if (method === 'ai.check_connectivity') {
     if (!_aiClient) {
       return {
-        jsonrpc: '2.0', id: request.id, request_id: requestId,
+        jsonrpc: '2.0',
+        id: request.id,
+        request_id: requestId,
         result: { connected: false, reason: 'AI client not initialized' },
       };
     }
@@ -258,11 +370,16 @@ async function handleMessage(msg: Message): Promise<JsonRpcResponse | null> {
       const connected = await _aiClient.checkConnectivity();
       _lastConnectivityResult = connected
         ? { connected: true }
-        : { connected: false, reason: 'AI request failed. Check API key, model, base URL, and network.' };
+        : {
+            connected: false,
+            reason: 'DeepSeek request failed. Check API key, quota, and network.',
+          };
       _lastConnectivityCheckAt = now;
     }
     return {
-      jsonrpc: '2.0', id: request.id, request_id: requestId,
+      jsonrpc: '2.0',
+      id: request.id,
+      request_id: requestId,
       result: _lastConnectivityResult,
     };
   }
@@ -273,11 +390,38 @@ async function handleMessage(msg: Message): Promise<JsonRpcResponse | null> {
     if (hadSession) {
       streamControllers.get(sessionId)!.abort();
       streamControllers.delete(sessionId);
-      console.error(`[sidecar] Stream cancelled by client [session_id=${sessionId}, trace_id=${traceId}]`);
+      console.error(
+        `[sidecar] Stream cancelled by client [session_id=${sessionId}, trace_id=${traceId}]`
+      );
     }
     return {
-      jsonrpc: '2.0', id: request.id, request_id: requestId,
+      jsonrpc: '2.0',
+      id: request.id,
+      request_id: requestId,
       result: { cancelled: !!hadSession, session_id: sessionId },
+    };
+  }
+
+  if (method === 'ai.approve_tool') {
+    const approvalId = (params as { approval_id?: string })?.approval_id;
+    const allow = !!(params as { allow?: boolean })?.allow;
+    if (!approvalId || !pendingToolApprovals.has(approvalId)) {
+      return {
+        jsonrpc: '2.0',
+        id: request.id,
+        request_id: requestId,
+        result: { success: false, error: 'Approval request not found' },
+      };
+    }
+    const pending = pendingToolApprovals.get(approvalId)!;
+    clearTimeout(pending.timeout);
+    pendingToolApprovals.delete(approvalId);
+    pending.resolve(allow);
+    return {
+      jsonrpc: '2.0',
+      id: request.id,
+      request_id: requestId,
+      result: { success: true, approval_id: approvalId, allow },
     };
   }
 
@@ -289,17 +433,26 @@ async function handleMessage(msg: Message): Promise<JsonRpcResponse | null> {
   if (method === 'dream.run') {
     if (!_dreamOrchestrator) {
       return {
-        jsonrpc: '2.0', id: request.id, request_id: requestId, trace_id: traceId,
+        jsonrpc: '2.0',
+        id: request.id,
+        request_id: requestId,
+        trace_id: traceId,
         error: { code: -32000, message: 'Dream orchestrator not initialized' },
       };
     }
     try {
       const result = await _dreamOrchestrator.run();
-      if (result.status === 'completed' && result.insights && result.insights.length > 0 && _memoryProjectionService) {
+      if (
+        result.status === 'completed' &&
+        result.insights &&
+        result.insights.length > 0 &&
+        _memoryProjectionService
+      ) {
         // Project all learned preferences from the dream analysis
         const prefs = result.preferences || {};
         _memoryProjectionService.projectFromDream({
-          confidence: result.insights.reduce((sum, i) => sum + i.confidence, 0) / result.insights.length,
+          confidence:
+            result.insights.reduce((sum, i) => sum + i.confidence, 0) / result.insights.length,
           insights: result.insights.map((i) => ({
             id: i.id,
             category: i.category,
@@ -313,23 +466,33 @@ async function handleMessage(msg: Message): Promise<JsonRpcResponse | null> {
           productivityTrend: prefs.productivityTrend,
           taskPreferences: prefs.taskPreferences,
         });
-        sendNotification('dream.completed', {
-          insights: result.insights,
-          summary: result.summary,
-        }, requestId);
+        sendNotification(
+          'dream.completed',
+          {
+            insights: result.insights,
+            summary: result.summary,
+          },
+          requestId
+        );
 
         // Forward buddy adjustments if present
         if (result.buddyAdjustments) {
           if (_buddyCore) {
             _buddyCore.applyDreamInsights(result.buddyAdjustments);
           }
-          sendNotification('dream.buddy_adjustments', {
-            adjustments: result.buddyAdjustments,
-          }, requestId);
+          sendNotification(
+            'dream.buddy_adjustments',
+            {
+              adjustments: result.buddyAdjustments,
+            },
+            requestId
+          );
         }
       }
       return {
-        jsonrpc: '2.0', id: request.id, request_id: requestId,
+        jsonrpc: '2.0',
+        id: request.id,
+        request_id: requestId,
         result,
       };
     } catch (err) {
@@ -338,7 +501,10 @@ async function handleMessage(msg: Message): Promise<JsonRpcResponse | null> {
         tags: { trace_id: traceId, method: 'dream.run', source: 'handleMessage' },
       });
       return {
-        jsonrpc: '2.0', id: request.id, request_id: requestId, trace_id: traceId,
+        jsonrpc: '2.0',
+        id: request.id,
+        request_id: requestId,
+        trace_id: traceId,
         error: { code: -32000, message: err instanceof Error ? err.message : String(err) },
       };
     }
@@ -347,12 +513,17 @@ async function handleMessage(msg: Message): Promise<JsonRpcResponse | null> {
   if (method === 'dream.status') {
     if (!_dreamOrchestrator) {
       return {
-        jsonrpc: '2.0', id: request.id, request_id: requestId, trace_id: traceId,
+        jsonrpc: '2.0',
+        id: request.id,
+        request_id: requestId,
+        trace_id: traceId,
         error: { code: -32000, message: 'Dream orchestrator not initialized' },
       };
     }
     return {
-      jsonrpc: '2.0', id: request.id, request_id: requestId,
+      jsonrpc: '2.0',
+      id: request.id,
+      request_id: requestId,
       result: _dreamOrchestrator.getStatus(),
     };
   }
@@ -361,7 +532,10 @@ async function handleMessage(msg: Message): Promise<JsonRpcResponse | null> {
   if (method === 'buddy.greet') {
     if (!_buddyCore) {
       return {
-        jsonrpc: '2.0', id: request.id, request_id: requestId, trace_id: traceId,
+        jsonrpc: '2.0',
+        id: request.id,
+        request_id: requestId,
+        trace_id: traceId,
         error: { code: -32000, message: 'Buddy not initialized' },
       };
     }
@@ -369,7 +543,9 @@ async function handleMessage(msg: Message): Promise<JsonRpcResponse | null> {
     const state = _buddyCore.getState();
     _buddyCore.recordInteraction();
     return {
-      jsonrpc: '2.0', id: request.id, request_id: requestId,
+      jsonrpc: '2.0',
+      id: request.id,
+      request_id: requestId,
       result: {
         greeting,
         mood: state.mood,
@@ -382,7 +558,10 @@ async function handleMessage(msg: Message): Promise<JsonRpcResponse | null> {
   if (method === 'buddy.comment') {
     if (!_buddyCore) {
       return {
-        jsonrpc: '2.0', id: request.id, request_id: requestId, trace_id: traceId,
+        jsonrpc: '2.0',
+        id: request.id,
+        request_id: requestId,
+        trace_id: traceId,
         error: { code: -32000, message: 'Buddy not initialized' },
       };
     }
@@ -390,7 +569,9 @@ async function handleMessage(msg: Message): Promise<JsonRpcResponse | null> {
     const comment = _buddyCore.generateScheduleComment(taskCount);
     const state = _buddyCore.getState();
     return {
-      jsonrpc: '2.0', id: request.id, request_id: requestId,
+      jsonrpc: '2.0',
+      id: request.id,
+      request_id: requestId,
       result: { comment, mood: state.mood },
     };
   }
@@ -398,14 +579,19 @@ async function handleMessage(msg: Message): Promise<JsonRpcResponse | null> {
   if (method === 'buddy.celebrate') {
     if (!_buddyCore) {
       return {
-        jsonrpc: '2.0', id: request.id, request_id: requestId, trace_id: traceId,
+        jsonrpc: '2.0',
+        id: request.id,
+        request_id: requestId,
+        trace_id: traceId,
         error: { code: -32000, message: 'Buddy not initialized' },
       };
     }
     const celebration = _buddyCore.generateCompletionCelebration();
     const state = _buddyCore.getState();
     return {
-      jsonrpc: '2.0', id: request.id, request_id: requestId,
+      jsonrpc: '2.0',
+      id: request.id,
+      request_id: requestId,
       result: { celebration, mood: state.mood },
     };
   }
@@ -413,7 +599,10 @@ async function handleMessage(msg: Message): Promise<JsonRpcResponse | null> {
   if (method === 'buddy.infer_mood') {
     if (!_buddyCore) {
       return {
-        jsonrpc: '2.0', id: request.id, request_id: requestId, trace_id: traceId,
+        jsonrpc: '2.0',
+        id: request.id,
+        request_id: requestId,
+        trace_id: traceId,
         error: { code: -32000, message: 'Buddy not initialized' },
       };
     }
@@ -423,7 +612,9 @@ async function handleMessage(msg: Message): Promise<JsonRpcResponse | null> {
     const mood = _buddyCore.inferMood(completedRatio, pendingCount, isLate);
     _buddyCore.setMood(mood);
     return {
-      jsonrpc: '2.0', id: request.id, request_id: requestId,
+      jsonrpc: '2.0',
+      id: request.id,
+      request_id: requestId,
       result: { mood },
     };
   }
@@ -431,7 +622,10 @@ async function handleMessage(msg: Message): Promise<JsonRpcResponse | null> {
   if (method === 'buddy.set_level') {
     if (!_buddyCore) {
       return {
-        jsonrpc: '2.0', id: request.id, request_id: requestId, trace_id: traceId,
+        jsonrpc: '2.0',
+        id: request.id,
+        request_id: requestId,
+        trace_id: traceId,
         error: { code: -32000, message: 'Buddy not initialized' },
       };
     }
@@ -440,7 +634,9 @@ async function handleMessage(msg: Message): Promise<JsonRpcResponse | null> {
       _buddyCore.setLevel(level);
     }
     return {
-      jsonrpc: '2.0', id: request.id, request_id: requestId,
+      jsonrpc: '2.0',
+      id: request.id,
+      request_id: requestId,
       result: { level: _buddyCore.getLevel() },
     };
   }
@@ -452,28 +648,32 @@ async function handleMessage(msg: Message): Promise<JsonRpcResponse | null> {
 
   if (method === 'api_key.status') {
     try {
-      const storedValue = _db?.getDb()
-        .prepare("SELECT value FROM preferences WHERE key = 'api_key'")
-        .get() as { value?: string } | undefined;
+      const storedValue = getStoredApiKey();
       const envValue = getEnvApiKey();
-      const activeValue = storedValue?.value || envValue;
+      const activeValue = storedValue || envValue;
       return {
-        jsonrpc: '2.0', id: request.id, request_id: requestId,
+        jsonrpc: '2.0',
+        id: request.id,
+        request_id: requestId,
         result: {
           success: true,
           data: {
             configured: !!activeValue,
             prefix: activeValue ? activeValue.slice(-4) : '',
-            source: storedValue?.value ? 'stored' : envValue ? 'environment' : 'none',
+            source: storedValue ? 'stored' : envValue ? 'environment' : 'none',
             provider: resolveAiProvider(),
             model: resolveAiModel(),
+            modelDisplay: DEEPSEEK_MODEL_DISPLAY,
             baseUrl: resolveAiBaseUrl(),
           },
         },
       };
     } catch (err) {
       return {
-        jsonrpc: '2.0', id: request.id, request_id: requestId, trace_id: traceId,
+        jsonrpc: '2.0',
+        id: request.id,
+        request_id: requestId,
+        trace_id: traceId,
         error: { code: -32000, message: err instanceof Error ? err.message : String(err) },
       };
     }
@@ -483,7 +683,10 @@ async function handleMessage(msg: Message): Promise<JsonRpcResponse | null> {
   if (!ALLOWED_CAPABILITIES.has(method)) {
     console.error(`[sidecar] Method not found [trace_id=${traceId}]: ${method}`);
     return {
-      jsonrpc: '2.0', id: request.id, request_id: requestId, trace_id: traceId,
+      jsonrpc: '2.0',
+      id: request.id,
+      request_id: requestId,
+      trace_id: traceId,
       error: {
         code: -32601,
         message: `Method not found or not allowed: ${method}`,
@@ -502,17 +705,25 @@ async function handleMessage(msg: Message): Promise<JsonRpcResponse | null> {
       session_id: request.session_id,
     });
     return {
-      jsonrpc: '2.0', id: request.id, request_id: requestId,
+      jsonrpc: '2.0',
+      id: request.id,
+      request_id: requestId,
       result: result,
     };
   } catch (err) {
-    console.error(`[sidecar] Capability invocation error [trace_id=${traceId}, method=${method}]:`, err);
+    console.error(
+      `[sidecar] Capability invocation error [trace_id=${traceId}, method=${method}]:`,
+      err
+    );
     captureException(err, {
       tags: { trace_id: traceId, method, source: 'capability_invocation' },
       extra: { payload },
     });
     return {
-      jsonrpc: '2.0', id: request.id, request_id: requestId, trace_id: traceId,
+      jsonrpc: '2.0',
+      id: request.id,
+      request_id: requestId,
+      trace_id: traceId,
       error: { code: -32000, message: err instanceof Error ? err.message : String(err) },
     };
   }
@@ -523,21 +734,29 @@ async function handleMessage(msg: Message): Promise<JsonRpcResponse | null> {
 async function handleAiChat(
   request: JsonRpcRequest,
   params: Record<string, unknown>,
-  traceId: string,
+  traceId: string
 ): Promise<JsonRpcResponse> {
   if (!_aiClient || !_registry || !_db) {
     return {
-      jsonrpc: '2.0', id: request.id, request_id: request.request_id, trace_id: traceId,
+      jsonrpc: '2.0',
+      id: request.id,
+      request_id: request.request_id,
+      trace_id: traceId,
       error: { code: -32000, message: 'AI engine not initialized. Set API key in Settings.' },
     };
   }
 
   const message = params.message as string;
   const sessionId = (params.session_id as string) || crypto.randomUUID();
+  const fastMode = params.fast !== false;
+  const mode = resolveAgentMode(params.mode, fastMode ? 'chat' : 'auto');
 
   if (!message || !message.trim()) {
     return {
-      jsonrpc: '2.0', id: request.id, request_id: request.request_id, trace_id: traceId,
+      jsonrpc: '2.0',
+      id: request.id,
+      request_id: request.request_id,
+      trace_id: traceId,
       error: { code: -32602, message: 'message is required' },
     };
   }
@@ -553,10 +772,14 @@ async function handleAiChat(
     const gen = runConversation(message, {
       client: _aiClient,
       registry: _registry,
-      tools: _aiTools,
+      tools: getToolsForMode(mode, fastMode),
       systemPrompt: _aiSystemPrompt,
       context,
       sessionId,
+      maxTurns: fastMode ? 1 : undefined,
+      maxTokens: fastMode ? 1200 : undefined,
+      temperature: fastMode ? 0.4 : undefined,
+      thinking: getThinkingForMode(mode, fastMode),
       onChunk: (chunk) => {
         collectedChunks.push(chunk);
         if (chunk.type === 'text_delta') {
@@ -573,7 +796,9 @@ async function handleAiChat(
     }
 
     return {
-      jsonrpc: '2.0', id: request.id, request_id: request.request_id,
+      jsonrpc: '2.0',
+      id: request.id,
+      request_id: request.request_id,
       result: {
         session_id: sessionId,
         text: finalText,
@@ -589,12 +814,18 @@ async function handleAiChat(
   } catch (err) {
     console.error(`[sidecar] ai.chat error [trace_id=${traceId}, session_id=${sessionId}]:`, err);
     return {
-      jsonrpc: '2.0', id: request.id, request_id: request.request_id, trace_id: traceId,
+      jsonrpc: '2.0',
+      id: request.id,
+      request_id: request.request_id,
+      trace_id: traceId,
       error: {
         code: -32000,
-        message: err instanceof ApiError
-          ? `AI API错误 [${err.status}]: ${err.message}`
-          : err instanceof Error ? err.message : String(err),
+        message:
+          err instanceof ApiError
+            ? `AI API错误 [${err.status}]: ${err.message}`
+            : err instanceof Error
+              ? err.message
+              : String(err),
       },
     };
   }
@@ -603,21 +834,28 @@ async function handleAiChat(
 async function handleAiStream(
   request: JsonRpcRequest,
   params: Record<string, unknown>,
-  traceId: string,
+  traceId: string
 ): Promise<JsonRpcResponse> {
   if (!_aiClient || !_registry || !_db) {
     return {
-      jsonrpc: '2.0', id: request.id, request_id: request.request_id, trace_id: traceId,
+      jsonrpc: '2.0',
+      id: request.id,
+      request_id: request.request_id,
+      trace_id: traceId,
       error: { code: -32000, message: 'AI engine not initialized. Set API key in Settings.' },
     };
   }
 
   const message = params.message as string;
   const sessionId = (params.session_id as string) || crypto.randomUUID();
+  const mode = resolveAgentMode(params.mode, 'auto');
 
   if (!message || !message.trim()) {
     return {
-      jsonrpc: '2.0', id: request.id, request_id: request.request_id, trace_id: traceId,
+      jsonrpc: '2.0',
+      id: request.id,
+      request_id: request.request_id,
+      trace_id: traceId,
       error: { code: -32602, message: 'message is required' },
     };
   }
@@ -654,16 +892,32 @@ async function handleAiStream(
       const gen = runConversation(message, {
         client: _aiClient!,
         registry: _registry!,
-        tools: _aiTools,
+        tools: getToolsForMode(mode),
         systemPrompt: _aiSystemPrompt,
         context,
         sessionId,
         abortSignal: controller.signal,
+        thinking: getThinkingForMode(mode),
+        confirmToolUse: async (permission) => {
+          if (!permission.mutating || mode === 'yolo') {
+            return true;
+          }
+          const allow = await waitForToolApproval(permission.approvalId);
+          return {
+            allow,
+            reason: allow ? undefined : `用户拒绝执行工具: ${permission.capabilityName}`,
+            requiresApproval: true,
+          };
+        },
         onChunk: (chunk) => {
           // Emit each chunk as a streaming event
-          sendNotification('ai.stream_chunk', {
-            ...chunk,
-          }, request.request_id);
+          sendNotification(
+            'ai.stream_chunk',
+            {
+              ...chunk,
+            },
+            request.request_id
+          );
         },
       });
 
@@ -672,21 +926,32 @@ async function handleAiStream(
       }
     } catch (err) {
       if ((err as Error)?.name === 'AbortError') {
-        sendNotification('ai.stream_chunk', {
-          type: 'done',
-          session_id: sessionId,
-          done: true,
-          content: 'Stream cancelled by user',
-        }, request.request_id);
+        sendNotification(
+          'ai.stream_chunk',
+          {
+            type: 'done',
+            session_id: sessionId,
+            done: true,
+            content: 'Stream cancelled by user',
+          },
+          request.request_id
+        );
         return;
       }
-      console.error(`[sidecar] ai.stream error [trace_id=${traceId}, session_id=${sessionId}]:`, err);
-      sendNotification('ai.stream_chunk', {
-        type: 'error',
-        session_id: sessionId,
-        error: err instanceof Error ? err.message : String(err),
-        done: true,
-      }, request.request_id);
+      console.error(
+        `[sidecar] ai.stream error [trace_id=${traceId}, session_id=${sessionId}]:`,
+        err
+      );
+      sendNotification(
+        'ai.stream_chunk',
+        {
+          type: 'error',
+          session_id: sessionId,
+          error: err instanceof Error ? err.message : String(err),
+          done: true,
+        },
+        request.request_id
+      );
     } finally {
       clearTimeout(gcTimer);
       streamControllers.delete(sessionId);
@@ -699,11 +964,14 @@ async function handleAiStream(
 async function handleAiSuggestToday(
   request: JsonRpcRequest,
   _params: Record<string, unknown>,
-  traceId: string,
+  traceId: string
 ): Promise<JsonRpcResponse> {
   if (!_aiClient || !_registry || !_db) {
     return {
-      jsonrpc: '2.0', id: request.id, request_id: request.request_id, trace_id: traceId,
+      jsonrpc: '2.0',
+      id: request.id,
+      request_id: request.request_id,
+      trace_id: traceId,
       error: { code: -32000, message: 'AI engine not initialized. Set API key in Settings.' },
     };
   }
@@ -725,33 +993,42 @@ async function handleAiSuggestToday(
     };
 
     const result = await _aiClient.createMessage(
-      [{
-        role: 'user',
-        content: `请基于以下 EvolveFlow 今日上下文，生成一条真正有帮助的中文日程建议。不要创建、修改或删除任何数据；不要输出 JSON；不要使用 Markdown；控制在 80 个汉字以内。\n\n${JSON.stringify(compactContext, null, 2)}`,
-      }],
+      [
+        {
+          role: 'user',
+          content: `请基于以下 EvolveFlow 今日上下文，生成一条真正有帮助的中文日程建议。不要创建、修改或删除任何数据；不要输出 JSON；不要使用 Markdown；控制在 80 个汉字以内。\n\n${JSON.stringify(compactContext, null, 2)}`,
+        },
+      ],
       undefined,
-      [{
-        type: 'text',
-        text: '你是 EvolveFlow 的日程建议引擎。你只输出一条针对当前用户数据的可执行建议，不编造不存在的任务或事件。',
-      }],
-      { maxTokens: 512, temperature: 0.4 },
+      [
+        {
+          type: 'text',
+          text: '你是 EvolveFlow 的日程建议引擎。你只输出一条针对当前用户数据的可执行建议，不编造不存在的任务或事件。',
+        },
+      ],
+      { maxTokens: 512, temperature: 0.4 }
     );
 
     const suggestion = result.response.content
       .filter((block) => block.type === 'text')
-      .map((block) => block.type === 'text' ? block.text : '')
+      .map((block) => (block.type === 'text' ? block.text : ''))
       .join('')
       .trim();
 
     if (!suggestion) {
       return {
-        jsonrpc: '2.0', id: request.id, request_id: request.request_id, trace_id: traceId,
+        jsonrpc: '2.0',
+        id: request.id,
+        request_id: request.request_id,
+        trace_id: traceId,
         error: { code: -32000, message: 'AI returned no text suggestion' },
       };
     }
 
     return {
-      jsonrpc: '2.0', id: request.id, request_id: request.request_id,
+      jsonrpc: '2.0',
+      id: request.id,
+      request_id: request.request_id,
       result: {
         success: true,
         data: {
@@ -763,12 +1040,18 @@ async function handleAiSuggestToday(
   } catch (err) {
     console.error(`[sidecar] ai.suggest_today error [trace_id=${traceId}]:`, err);
     return {
-      jsonrpc: '2.0', id: request.id, request_id: request.request_id, trace_id: traceId,
+      jsonrpc: '2.0',
+      id: request.id,
+      request_id: request.request_id,
+      trace_id: traceId,
       error: {
         code: -32000,
-        message: err instanceof ApiError
-          ? `AI API错误 [${err.status}]: ${err.message}`
-          : err instanceof Error ? err.message : String(err),
+        message:
+          err instanceof ApiError
+            ? `AI API错误 [${err.status}]: ${err.message}`
+            : err instanceof Error
+              ? err.message
+              : String(err),
       },
     };
   }
@@ -779,7 +1062,7 @@ async function handleAiSuggestToday(
 async function handleSummaryGenerateDaily(
   request: JsonRpcRequest,
   params: Record<string, unknown>,
-  traceId: string,
+  traceId: string
 ): Promise<JsonRpcResponse> {
   const requestId = request.request_id;
 
@@ -802,22 +1085,42 @@ async function handleSummaryGenerateDaily(
     if (_aiClient && data) {
       try {
         const date = (params.date as string) || new Date().toISOString().split('T')[0];
-        const completedItems = Array.isArray(data.completed_items) ? (data.completed_items as string[]) : [];
-        const incompleteItems = Array.isArray(data.incomplete_items) ? (data.incomplete_items as string[]) : [];
-        const deferredItems = Array.isArray(data.deferred_items) ? (data.deferred_items as string[]) : [];
+        const completedItems = Array.isArray(data.completed_items)
+          ? (data.completed_items as string[])
+          : [];
+        const incompleteItems = Array.isArray(data.incomplete_items)
+          ? (data.incomplete_items as string[])
+          : [];
+        const deferredItems = Array.isArray(data.deferred_items)
+          ? (data.deferred_items as string[])
+          : [];
 
         // Query previous summaries for comparison context
         let previousContext = '';
         try {
-          const prevRows = _db!.getDb().prepare(
-            "SELECT date, completed_items, incomplete_items FROM daily_summaries WHERE date < ? ORDER BY date DESC LIMIT 3"
-          ).all(date) as Array<{ date: string; completed_items: string; incomplete_items: string }>;
+          const prevRows = _db!
+            .getDb()
+            .prepare(
+              'SELECT date, completed_items, incomplete_items FROM daily_summaries WHERE date < ? ORDER BY date DESC LIMIT 3'
+            )
+            .all(date) as Array<{
+            date: string;
+            completed_items: string;
+            incomplete_items: string;
+          }>;
           if (prevRows.length > 0) {
-            previousContext = '\nRecent days:\n' + prevRows.map(r =>
-              `- ${r.date}: completed ${JSON.parse(r.completed_items).length}, incomplete ${JSON.parse(r.incomplete_items).length}`
-            ).join('\n');
+            previousContext =
+              '\nRecent days:\n' +
+              prevRows
+                .map(
+                  (r) =>
+                    `- ${r.date}: completed ${JSON.parse(r.completed_items).length}, incomplete ${JSON.parse(r.incomplete_items).length}`
+                )
+                .join('\n');
           }
-        } catch { /* no previous data */ }
+        } catch {
+          /* no previous data */
+        }
 
         const prompt = `You are EvolveFlow, a personal productivity assistant. Analyze the user's daily task data and provide concise, actionable insights in Chinese.
 
@@ -834,21 +1137,16 @@ Return ONLY valid JSON. No markdown, no code fences, no explanation:
   "mood": "productive|moderate|needs_improvement"
 }`;
 
-        // Use cheapest model for summary generation
-        const model = _aiClient.getProvider() === 'anthropic'
-          ? 'claude-haiku-3-5-20241022'
-          : undefined;
-
         const aiResult = await _aiClient.createMessage(
           [{ role: 'user', content: prompt }],
           undefined,
           undefined,
-          { model, maxTokens: 500, temperature: 0.7 },
+          { maxTokens: 500, temperature: 0.7 }
         );
 
         const text = aiResult.response.content
-          .filter(c => c.type === 'text')
-          .map(c => (c as { text: string }).text)
+          .filter((c) => c.type === 'text')
+          .map((c) => (c as { text: string }).text)
           .join(' ');
 
         const jsonMatch = text.match(/\{[\sS]*\}/);
@@ -869,7 +1167,9 @@ Return ONLY valid JSON. No markdown, no code fences, no explanation:
     }
 
     return {
-      jsonrpc: '2.0', id: request.id, request_id: requestId,
+      jsonrpc: '2.0',
+      id: request.id,
+      request_id: requestId,
       result: {
         success: true,
         data: {
@@ -885,7 +1185,10 @@ Return ONLY valid JSON. No markdown, no code fences, no explanation:
       tags: { trace_id: traceId, method: 'summary.generate_daily', source: 'handleMessage' },
     });
     return {
-      jsonrpc: '2.0', id: request.id, request_id: requestId, trace_id: traceId,
+      jsonrpc: '2.0',
+      id: request.id,
+      request_id: requestId,
+      trace_id: traceId,
       error: { code: -32000, message: err instanceof Error ? err.message : String(err) },
     };
   }
@@ -894,21 +1197,36 @@ Return ONLY valid JSON. No markdown, no code fences, no explanation:
 // ── Notification Handling ─────────────────────────────────────
 
 function handleNotification(msg: JsonRpcNotification): void {
-  console.error(`[sidecar] Notification received: method=${msg.method}`, msg.params ? JSON.stringify(msg.params).slice(0, 200) : '(no params)');
+  console.error(
+    `[sidecar] Notification received: method=${msg.method}`,
+    msg.params ? JSON.stringify(msg.params).slice(0, 200) : '(no params)'
+  );
 }
 
 function sendNotification(
   method: string,
   params: Record<string, unknown>,
-  requestId?: string,
+  requestId?: string
 ): void {
   const notification: JsonRpcNotification = {
     jsonrpc: '2.0',
     method,
     params,
   };
-  if (requestId) {notification.request_id = requestId;}
+  if (requestId) {
+    notification.request_id = requestId;
+  }
   process.stdout.write(JSON.stringify(notification) + '\n');
+}
+
+function waitForToolApproval(approvalId: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      pendingToolApprovals.delete(approvalId);
+      resolve(false);
+    }, 120_000);
+    pendingToolApprovals.set(approvalId, { resolve, timeout });
+  });
 }
 
 // ── Reminder Poller ───────────────────────────────────────────
@@ -935,7 +1253,8 @@ function startReminderPoller(): void {
 
       if (_db) {
         const placeholders = dueReminders.map(() => '?').join(',');
-        _db.getDb()
+        _db
+          .getDb()
           .prepare(`UPDATE reminders SET status = 'triggered' WHERE id IN (${placeholders})`)
           .run(...dueReminders.map((r) => r.id));
       }
@@ -953,10 +1272,14 @@ function startDailySummaryScheduler(): void {
       try {
         // Actually generate and persist the summary via the capability
         if (_registry) {
-          await _registry.invoke('summary.generate_daily', { date }, {
-            actor: 'system',
-            origin: 'reminder_system',
-          });
+          await _registry.invoke(
+            'summary.generate_daily',
+            { date },
+            {
+              actor: 'system',
+              origin: 'reminder_system',
+            }
+          );
         }
       } catch (err) {
         console.error('[sidecar] Daily summary generation failed:', err);
@@ -971,11 +1294,15 @@ function startDailySummaryScheduler(): void {
 
 function startDreamScheduler(): void {
   setInterval(async () => {
-    if (!_dreamOrchestrator || !_memoryProjectionService || !_db) {return;}
+    if (!_dreamOrchestrator || !_memoryProjectionService || !_db) {
+      return;
+    }
 
     try {
       // Change-detection: skip if no new action_logs since last run
-      const row = _db.getDb().prepare('SELECT COUNT(*) as count FROM action_logs').get() as { count: number };
+      const row = _db.getDb().prepare('SELECT COUNT(*) as count FROM action_logs').get() as {
+        count: number;
+      };
       if (row.count === _lastRunActionLogCount) {
         // No new activity — skip to avoid unnecessary AI API calls
         return;
@@ -991,7 +1318,8 @@ function startDreamScheduler(): void {
         if (result.status === 'completed' && result.insights && result.insights.length > 0) {
           const prefs = result.preferences || {};
           _memoryProjectionService.projectFromDream({
-            confidence: result.insights.reduce((sum, i) => sum + i.confidence, 0) / result.insights.length,
+            confidence:
+              result.insights.reduce((sum, i) => sum + i.confidence, 0) / result.insights.length,
             insights: result.insights.map((i) => ({
               id: i.id,
               category: i.category,
@@ -1031,62 +1359,57 @@ function startDreamScheduler(): void {
 // ── AI Engine Initialization ──────────────────────────────────
 
 function getEnvApiKey(): string {
-  return process.env.EVOLVEFLOW_AI_KEY
-    || process.env.ANTHROPIC_AUTH_TOKEN
-    || process.env.ANTHROPIC_API_KEY
-    || '';
+  return getEnvDeepSeekApiKey();
 }
 
-function resolveAiBaseUrl(): string | undefined {
-  return process.env.EVOLVEFLOW_AI_BASE_URL || process.env.ANTHROPIC_BASE_URL || undefined;
-}
-
-function resolveAiProvider(): 'anthropic' | 'deepseek' {
-  // Determine provider: preferences > env var > default (deepseek)
-  let provider: 'anthropic' | 'deepseek' = 'deepseek';
+function getStoredApiKey(): string {
+  if (!_db) {
+    return '';
+  }
   try {
-    const providerRow = _db?.getDb()
-      .prepare("SELECT value FROM preferences WHERE key = 'ai_provider'")
-      .get() as { value?: string } | undefined;
-    if (providerRow?.value && (providerRow.value === 'anthropic' || providerRow.value === 'deepseek')) {
-      provider = providerRow.value;
-    } else if (process.env.EVOLVEFLOW_AI_PROVIDER === 'anthropic' || process.env.EVOLVEFLOW_AI_PROVIDER === 'deepseek') {
-      provider = process.env.EVOLVEFLOW_AI_PROVIDER;
-    } else if (resolveAiBaseUrl()?.includes('deepseek.com')) {
-      provider = 'deepseek';
-    }
-  } catch { /* use default */ }
-  return provider;
+    const preferenceService = new PreferenceService(_db.getDb());
+    return preferenceService.get('api_key') || '';
+  } catch {
+    return '';
+  }
 }
 
-function resolveAiModel(): string | undefined {
-  // Determine model: preferences > env var > provider default (set by ApiClient)
-  let model: string | undefined;
-  try {
-    const modelRow = _db?.getDb()
-      .prepare("SELECT value FROM preferences WHERE key = 'ai_model'")
-      .get() as { value?: string } | undefined;
-    if (modelRow?.value) {
-      model = modelRow.value;
-    } else if (process.env.EVOLVEFLOW_AI_MODEL) {
-      model = process.env.EVOLVEFLOW_AI_MODEL;
-    } else if (process.env.ANTHROPIC_MODEL) {
-      model = process.env.ANTHROPIC_MODEL;
-    } else if (process.env.ANTHROPIC_DEFAULT_SONNET_MODEL) {
-      model = process.env.ANTHROPIC_DEFAULT_SONNET_MODEL;
-    } else if (process.env.ANTHROPIC_DEFAULT_OPUS_MODEL) {
-      model = process.env.ANTHROPIC_DEFAULT_OPUS_MODEL;
-    } else if (process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL) {
-      model = process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL;
-    }
-  } catch { /* use provider default */ }
-  return model;
+function resolveAiBaseUrl(): string {
+  return DEEPSEEK_ANTHROPIC_BASE_URL;
+}
+
+function resolveAiProvider(): 'DeepSeek' {
+  return DEEPSEEK_PROVIDER;
+}
+
+function resolveAiModel(): string {
+  return DEEPSEEK_MODEL;
+}
+
+function resolveAgentMode(value: unknown, fallback: AgentMode): AgentMode {
+  const mode = String(value || fallback).toLowerCase() as AgentMode;
+  return AGENT_MODES.has(mode) ? mode : fallback;
+}
+
+function getToolsForMode(mode: AgentMode, fastMode = false): AnthropicTool[] {
+  if (fastMode) {
+    return [];
+  }
+  if (mode === 'chat' || mode === 'plan') {
+    return _aiTools.filter((tool) => {
+      const capabilityName = tool.name
+        .replace(/__(?=.)/g, '\0')
+        .replace(/_/g, '.')
+        .replace(/\0/g, '_');
+      return !_registry?.get(capabilityName)?.mutating;
+    });
+  }
+  return _aiTools;
 }
 
 function initAiEngine(apiKey: string): void {
-  const provider = resolveAiProvider();
-  const model = resolveAiModel();
-  const baseUrl = resolveAiBaseUrl();
+  _lastConnectivityCheckAt = 0;
+  _lastConnectivityResult = { connected: false, reason: 'not checked' };
 
   // Determine API key: parameter > preference store > env var
   if (!apiKey) {
@@ -1101,9 +1424,6 @@ function initAiEngine(apiKey: string): void {
 
   _aiClient = new ApiClient({
     apiKey,
-    baseUrl,
-    model,
-    provider,
     maxTokens: 8192,
     timeoutMs: 120_000,
     maxRetries: 3,
@@ -1178,15 +1498,13 @@ function main(): void {
     if (buddyLevelRow?.value && ['full', 'minimal', 'off'].includes(buddyLevelRow.value)) {
       _buddyCore.setLevel(buddyLevelRow.value as 'full' | 'minimal' | 'off');
     }
-  } catch { /* use default level */ }
+  } catch {
+    /* use default level */
+  }
 
   // Initialize AI engine from stored API key
   try {
-    const dbInstance = db.getDb();
-    const apiKeyRow = dbInstance
-      .prepare("SELECT value FROM preferences WHERE key = 'api_key'")
-      .get() as { value?: string } | undefined;
-    initAiEngine(apiKeyRow?.value || '');
+    initAiEngine(getStoredApiKey());
   } catch {
     initAiEngine('');
   }
@@ -1219,7 +1537,9 @@ function main(): void {
     } catch (err) {
       const rawPreview = line.length > 200 ? line.slice(0, 200) + '...' : line;
       console.error(`[sidecar] JSON parse error on input (truncated to 200 chars): ${rawPreview}`);
-      console.error(`[sidecar] Parse error details: ${err instanceof Error ? err.message : String(err)}`);
+      console.error(
+        `[sidecar] Parse error details: ${err instanceof Error ? err.message : String(err)}`
+      );
       captureException(err, {
         tags: { source: 'stdin_parse' },
         extra: { rawPreview },
@@ -1256,13 +1576,13 @@ function main(): void {
   startDailySummaryScheduler();
   startDreamScheduler();
 
-  // Re-initialize AI engine when API key, provider, or model changes
+  // Re-initialize AI engine when the DeepSeek API key changes.
   const origInvoke = _registry.invoke.bind(_registry);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (_registry as any).invoke = async function (
     name: string,
     input: Record<string, unknown>,
-    ctx: Record<string, unknown>,
+    ctx: Record<string, unknown>
   ) {
     const result = await origInvoke(name, input, ctx as never);
     // If preference changed, re-initialize AI engine
@@ -1276,7 +1596,7 @@ function main(): void {
           _dreamOrchestrator = new DreamOrchestrator(
             path.join(os.homedir(), '.evolveflow', 'app-data', 'memories'),
             rawDb,
-            _aiClient,
+            _aiClient
           );
         } else if (_aiClient && _dreamOrchestrator) {
           // Update the orchestrator's API client reference
@@ -1286,18 +1606,6 @@ function main(): void {
         const level = (input as { value?: string })?.value;
         if (level && ['full', 'minimal', 'off'].includes(level) && _buddyCore) {
           _buddyCore.setLevel(level as 'full' | 'minimal' | 'off');
-        }
-      } else if (setKey === 'ai_provider' || setKey === 'ai_model') {
-        // Re-init with current API key when provider or model changes
-        const dbInstance = _db?.getDb();
-        const currentApiKeyRow = dbInstance
-          ?.prepare("SELECT value FROM preferences WHERE key = 'api_key'")
-          .get() as { value?: string } | undefined;
-        if (currentApiKeyRow?.value) {
-          initAiEngine(currentApiKeyRow.value);
-          if (_aiClient && _dreamOrchestrator) {
-            _dreamOrchestrator.updateConfig({ modelName: _aiClient.getModel() });
-          }
         }
       }
     }

@@ -1,12 +1,20 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import React, { createContext, useContext, useState, useEffect, useRef, useCallback, type ReactNode } from 'react';
+import React, {
+  createContext,
+  useContext,
+  useState,
+  useEffect,
+  useRef,
+  useCallback,
+  type ReactNode,
+} from 'react';
 
 // ── Capability Invocation ──────────────────────────────────────
 
 export async function callCapability(
   method: string,
-  params?: Record<string, unknown>,
+  params?: Record<string, unknown>
 ): Promise<unknown> {
   return invoke('invoke_capability', { method, params: params ?? null });
 }
@@ -22,16 +30,17 @@ export async function getSidecarStatus(): Promise<{
 
 // ── AI Methods ─────────────────────────────────────────────────
 
-export async function startAiSession(sessionId: string, message: string): Promise<{
+export async function startAiSession(
+  sessionId: string,
+  message: string
+): Promise<{
   session_id: string;
   streaming: boolean;
 }> {
   return invoke('start_ai_session', { sessionId, message });
 }
 
-export async function getDegradationState(): Promise<
-  'full' | 'ai_offline' | 'critical'
-> {
+export async function getDegradationState(): Promise<'full' | 'ai_offline' | 'critical'> {
   return invoke('get_degradation_state');
 }
 
@@ -50,6 +59,9 @@ export interface AiStreamChunk {
   type: string;
   session_id?: string;
   content?: string;
+  approval_id?: string;
+  capability_name?: string;
+  mutating?: boolean;
   tool_name?: string;
   tool_use_id?: string;
   tool_input?: Record<string, unknown>;
@@ -59,9 +71,7 @@ export interface AiStreamChunk {
   done?: boolean;
 }
 
-export function onAiStreamChunk(
-  callback: (chunk: AiStreamChunk) => void,
-): () => void {
+export function onAiStreamChunk(callback: (chunk: AiStreamChunk) => void): () => void {
   const unlisten = listen<AiStreamChunk>('ai-stream-chunk', (e) => {
     // The payload is already typed as AiStreamChunk by listen<T>
     const chunk = e.payload;
@@ -113,7 +123,9 @@ export function useDegradationState(pollIntervalMs = 30000): {
   }, []);
 
   const startPolling = useCallback(() => {
-    if (intervalRef.current !== null) {return;}
+    if (intervalRef.current !== null) {
+      return;
+    }
     poll(); // Immediate first poll
     intervalRef.current = setInterval(poll, pollIntervalMs);
   }, [poll, pollIntervalMs]);
@@ -145,9 +157,5 @@ export function DegradationProvider({
     startPolling();
   }, [startPolling]);
 
-  return React.createElement(
-    DegradationContext.Provider,
-    { value: state },
-    children,
-  );
+  return React.createElement(DegradationContext.Provider, { value: state }, children);
 }

@@ -169,7 +169,13 @@ async fn get_degradation_state(
         return Ok("critical".to_string());
     }
 
-    match state.send_request("ai.check_connectivity", None).await {
+    match state
+        .send_request(
+            "ai.check_connectivity",
+            Some(serde_json::json!({ "force": true })),
+        )
+        .await
+    {
         Ok(resp) => {
             let connected = resp
                 .result

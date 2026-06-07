@@ -11,6 +11,7 @@ import {
   Send,
   Sparkles,
   Star,
+  Trash2,
   Wand2,
 } from 'lucide-react';
 import { callCapability } from '../lib/tauri';
@@ -58,7 +59,11 @@ interface Reminder {
 const HOURS = Array.from({ length: 12 }, (_, i) => i + 8);
 
 function todayIsoDate() {
-  return new Date().toISOString().split('T')[0];
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const day = String(now.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
 }
 
 function timeOf(value: string | null | undefined) {
@@ -205,6 +210,31 @@ export default function TodayPage() {
     }
   }
 
+  async function handleClearGeneratedSchedule() {
+    const confirmed = window.confirm(t('today.confirm_clear_schedule'));
+    if (!confirmed) {return;}
+    setIsLoading(true);
+    try {
+      const result = await callCapability('schedule.clear_day', { date: today }) as {
+        success: boolean;
+        data?: { remaining?: ScheduleBlock[] };
+        error?: string;
+      };
+      if (result.success) {
+        setSchedule(result.data?.remaining || []);
+        await loadAllData();
+      } else {
+        setError(result.error || t('today.clear_schedule_fail'));
+      }
+    } catch (err) {
+      console.error('Failed to clear generated schedule:', err);
+      const message = err instanceof Error ? err.message : String(err);
+      setError(message.includes('invoke') ? null : message);
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
   async function handleComplete(id: string) {
     try {
       await callCapability('task.complete', { task_id: id });
@@ -269,6 +299,10 @@ export default function TodayPage() {
             <Sparkles size={16} />
             {t('today.auto_schedule')}
           </button>
+          <button className="btn btn-secondary" onClick={handleClearGeneratedSchedule} disabled={isLoading || schedule.length === 0}>
+            <Trash2 size={16} />
+            {t('today.clear_auto_schedule')}
+          </button>
         </div>
       </div>
 
@@ -301,6 +335,10 @@ export default function TodayPage() {
         <button className="btn btn-primary" onClick={handleQuickAdd}>
           <Plus size={16} />
           {t('today.quick_add')}
+        </button>
+        <button className="btn btn-secondary" onClick={handleClearGeneratedSchedule} disabled={isLoading || schedule.length === 0}>
+          <Trash2 size={16} />
+          {t('today.clear_auto_schedule')}
         </button>
         <button className="btn btn-secondary" onClick={handlePlanDay}>
           <Wand2 size={16} />

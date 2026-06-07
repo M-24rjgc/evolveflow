@@ -1,4 +1,11 @@
-import React, { createContext, useContext, useState, useCallback, useEffect, type ReactNode } from 'react';
+import React, {
+  createContext,
+  useContext,
+  useState,
+  useCallback,
+  useEffect,
+  type ReactNode,
+} from 'react';
 
 // ── Types ─────────────────────────────────────────────────────────
 
@@ -85,6 +92,10 @@ const ZH_CN: TranslationDict = {
     load_schedule_fail: '加载排程失败',
     load_reminders_fail: '加载提醒失败',
     quick_add_fail: '添加任务失败',
+    clear_auto_schedule: '清空自动排程',
+    clear_schedule_fail: '清空排程失败',
+    confirm_clear_schedule:
+      '只会清除自动生成且未锁定的排程，锁定或手动调整的内容会保留。确定继续吗？',
     ai_generated: '基于你的使用数据生成',
     aiGenerated: '基于你的使用数据生成',
     confirm_delete: '确定要删除此任务吗？',
@@ -121,7 +132,8 @@ const ZH_CN: TranslationDict = {
     conflict: '冲突',
     more: '更多',
     collapse: '收起',
-    drag_hint: '提示：拖拽任务块可调整时间 | 🔒 表示已锁定 | ⚠ 表示时间冲突 | 点击锁定按钮可锁定/解锁',
+    drag_hint:
+      '提示：拖拽任务块可调整时间 | 🔒 表示已锁定 | ⚠ 表示时间冲突 | 点击锁定按钮可锁定/解锁',
     weekdays: ['日', '一', '二', '三', '四', '五', '六'],
     weekday_en: ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'],
     add_event: '添加事件',
@@ -131,6 +143,10 @@ const ZH_CN: TranslationDict = {
     end_time: '结束时间',
     create_error: '创建事件失败',
     delete_error: '删除事件失败',
+    clear_auto_schedule: '清空自动排程',
+    clear_schedule_error: '清空排程失败',
+    confirm_clear_schedule:
+      '只会清除当天自动生成且未锁定的排程，锁定或手动调整的内容会保留。确定继续吗？',
     confirm_delete_event: '确认删除事件？',
     delete_irreversible: '此操作不可撤销。',
     events_section: '事件',
@@ -244,7 +260,8 @@ const ZH_CN: TranslationDict = {
   // ── AI Page ─────────────────────────────────────────────────
   ai: {
     title: 'AI 助手',
-    welcome: '你好！我是 EvolveFlow AI 助手。我可以帮你管理日程、安排任务、分析效率。试试直接告诉我你想做什么，比如"帮我安排明天的工作"或"看看我今天还有什么没完成"。',
+    welcome:
+      '你好！我是 EvolveFlow AI 助手，由 DeepSeek-V4-Flash 驱动。我可以帮你管理日程、安排任务、分析效率。试试直接告诉我你想做什么，比如"帮我安排明天的工作"或"看看我今天还有什么没完成"。',
     check_connection: '检查连接中...',
     ready: 'AI 就绪',
     no_key: '请在设置中配置 API Key',
@@ -259,7 +276,8 @@ const ZH_CN: TranslationDict = {
     input_placeholder: '输入消息，例如"帮我安排明天的工作"或"分析我的效率"...',
     input_no_key: '请先在设置中配置 API Key...',
     input_streaming: 'AI 正在回复...',
-    no_key_banner: '尚未配置 AI API Key。请前往 设置页面 配置你的 Anthropic API Key，然后回到这里即可开始使用 AI 助手。',
+    no_key_banner:
+      '尚未配置 AI API Key。请前往设置页面配置你的 DeepSeek API Key，然后回到这里即可开始使用 AI 助手。',
     no_key_banner_prefix: '尚未配置 AI API Key。请前往 ',
     no_key_banner_suffix: ' 配置你的 API Key，然后回到这里即可开始使用 AI 助手。',
     offline_banner: 'AI 服务当前不可用。请检查网络连接和 API Key 配置。',
@@ -304,6 +322,7 @@ const ZH_CN: TranslationDict = {
       schedule_plan_day: '日排程',
       schedule_plan_range: '范围排程',
       schedule_rebalance: '重新平衡',
+      schedule_clear_day: '清空自动排程',
       schedule_explain: '解释排程',
       reminder_snooze: '延迟提醒',
       summary_generate_daily: '生成日总结',
@@ -324,6 +343,10 @@ const ZH_CN: TranslationDict = {
     dream_never_run: '尚未运行',
     dream_last_run: '上次 {time}',
     token_label: 'Tokens',
+    model_label: '模型',
+    tool_approval_title: '工具执行确认',
+    yolo_confirm: '确认开启 YOLO 模式？开启后写入工具和终端工具将不再逐项确认。',
+    yolo_banner: 'YOLO 模式已开启：写入工具和终端工具将直接执行。',
     user_label: '你',
     ai_label: 'AI',
   },
@@ -403,10 +426,11 @@ const ZH_CN: TranslationDict = {
     style_tight: '紧凑（任务背靠背安排）',
     save_preferences: '保存偏好',
     ai_config: 'AI 配置',
-    api_key_label: 'Anthropic API Key',
-    api_key_desc: '配置你的 Claude API Key 以启用 AI 助手功能。API Key 使用 AES-256-GCM 加密存储在本地数据库中。',
+    api_key_label: 'DeepSeek API Key',
+    api_key_desc:
+      '配置你的 DeepSeek API Key 以启用 AI 助手功能。API Key 使用 AES-256-GCM 加密存储在本地数据库中。',
     api_key_configured: 'API Key 已配置 (以 ...{suffix})',
-    api_key_placeholder: 'sk-ant-api03-...',
+    api_key_placeholder: 'sk-...',
     api_key_save: '保存',
     api_key_update: '更新',
     api_key_change: '更改',
@@ -418,7 +442,7 @@ const ZH_CN: TranslationDict = {
     connectivity_checking: '检查中...',
     connectivity_ok: '数据库和核心服务运行正常',
     connectivity_error: '连接异常',
-    ai_check_ok: 'AI 服务连接正常 — 你现在可以在 AI 页面使用 Claude 助手了',
+    ai_check_ok: 'AI 服务连接正常 — 当前模型为 DeepSeek-V4-Flash',
     ai_check_fail: 'AI 服务不可用: {reason}',
     buddy_settings: 'Buddy 设置',
     buddy_full: '完整',
@@ -446,10 +470,13 @@ const ZH_CN: TranslationDict = {
     lang_zh: '中文',
     lang_en: 'English',
     localeSwitched: '语言已切换',
-    apiKeyLabelAnthropic: 'Anthropic API Key',
+    ai_provider: '服务商',
+    ai_model: '固定模型',
+    apiKeyLabelAnthropic: 'DeepSeek API Key',
     apiKeyLabelDeepseek: 'DeepSeek API Key',
-    apiKeyDescAnthropic: '配置你的 Claude API Key 以启用 AI 助手功能。',
-    apiKeyDescDeepseek: '配置你的 DeepSeek API Key 以启用 AI 助手功能。DeepSeek 提供与 Anthropic 兼容的 API 接口。',
+    apiKeyDescAnthropic: '配置你的 DeepSeek API Key 以启用 AI 助手功能。',
+    apiKeyDescDeepseek:
+      '配置你的 DeepSeek API Key 以启用 AI 助手功能。EvolveFlow 固定使用 DeepSeek-V4-Flash。',
     apiKeyConfiguredLabel: '{provider} API Key 已保存 ({prefix}...)',
     savedWorkHours: '工作时段已保存',
     saveFailed: '保存失败: {reason}',
@@ -458,8 +485,8 @@ const ZH_CN: TranslationDict = {
     aiInitializing: 'AI 引擎已初始化，正在检查连接...',
     saveApiKeyFailed: '保存 API Key 失败: {reason}',
     clearFailed: '清除失败: {reason}',
-    switchedProvider: '已切换到 {provider}，请输入新的 API Key。',
-    providerSwitchFailed: '切换服务商失败: {reason}',
+    switchedProvider: 'AI 服务固定为 {provider}。',
+    providerSwitchFailed: 'AI 服务配置失败: {reason}',
     buddyModeFull: '完整',
     buddyModeMinimal: '弱化',
     buddyModeOff: '关闭',
@@ -523,7 +550,8 @@ const ZH_CN: TranslationDict = {
     verified_no: '验证失败',
     unverified: '未验证',
     info_title: '备份说明',
-    info_text: '备份包含完整的数据库（任务、事件、偏好设置）和记忆数据。恢复操作会将当前数据替换为备份版本，建议在恢复前先创建当前状态的备份。系统最多保留 10 个最新备份，最旧的备份会被自动清理。',
+    info_text:
+      '备份包含完整的数据库（任务、事件、偏好设置）和记忆数据。恢复操作会将当前数据替换为备份版本，建议在恢复前先创建当前状态的备份。系统最多保留 10 个最新备份，最旧的备份会被自动清理。',
     created: '备份已创建: {name}',
     create_failed: '创建备份失败',
     verify_success: '备份完整性验证通过',
@@ -603,7 +631,8 @@ const ZH_CN: TranslationDict = {
     session_count: '{count} 次',
     error_already_running: 'Dream 系统正在运行中，请稍候...',
     empty_title: '正在收集数据以了解你的习惯...',
-    empty_desc: 'Dream 系统会在后台自动分析你的任务完成情况和行为模式，\n生成关于生产力、能量周期、排程偏好等方面的洞察。\n点击「手动分析」可以立即触发一次分析。',
+    empty_desc:
+      'Dream 系统会在后台自动分析你的任务完成情况和行为模式，\n生成关于生产力、能量周期、排程偏好等方面的洞察。\n点击「手动分析」可以立即触发一次分析。',
     view_evidence: '查看证据',
     hide_evidence: '收起证据',
     confidence: '信心度: {pct}%',
@@ -672,13 +701,17 @@ const ZH_CN: TranslationDict = {
     section_labels: ['快速入门', '键盘快捷键', 'AI 助手技巧', '常见问题'],
     section_getting_started: '快速入门',
     gs_0_title: '创建第一个任务',
-    gs_0_content: '在"今天"或"任务"页面的输入框中输入任务名称，点击"添加"按钮即可快速创建任务。你也可以在 AI 页面直接描述你需要做的事。',
+    gs_0_content:
+      '在"今天"或"任务"页面的输入框中输入任务名称，点击"添加"按钮即可快速创建任务。你也可以在 AI 页面直接描述你需要做的事。',
     gs_1_title: '自动排程',
-    gs_1_content: '在"今天"页面点击"自动排程"按钮，AI 会根据你的任务优先级、截止日期和工作时段自动安排一天的日程。',
+    gs_1_content:
+      '在"今天"页面点击"自动排程"按钮，AI 会根据你的任务优先级、截止日期和工作时段自动安排一天的日程。',
     gs_2_title: '日历视图',
-    gs_2_content: '在"日历"页面可以查看日、周、月三种视图。你可以拖拽任务块来调整时间，也可以锁定任务防止被自动调整。',
+    gs_2_content:
+      '在"日历"页面可以查看日、周、月三种视图。你可以拖拽任务块来调整时间，也可以锁定任务防止被自动调整。',
     gs_3_title: 'AI 助手',
-    gs_3_content: '在 AI 页面可以与 Claude AI 对话，让它帮你管理日程、安排任务、分析效率。首次使用需要在设置页面配置 API Key。',
+    gs_3_content:
+      '在 AI 页面可以与 DeepSeek-V4-Flash 对话，让它帮你管理日程、安排任务、分析效率。首次使用需要在设置页面配置 API Key。',
     section_shortcuts: '键盘快捷键',
     sc_0_title: 'Ctrl+N',
     sc_0_content: '新建任务 — 快速跳转到任务页面并准备创建新任务。',
@@ -694,28 +727,35 @@ const ZH_CN: TranslationDict = {
     sc_5_content: '关闭弹窗或取消当前编辑。',
     section_ai_tips: 'AI 助手技巧',
     ai_0_title: '自然语言交互',
-    ai_0_content: '你可以直接告诉 AI "帮我安排明天的工作"或"分析我这周的效率"，AI 会自动执行相应的操作。',
+    ai_0_content:
+      '你可以直接告诉 AI "帮我安排明天的工作"或"分析我这周的效率"，AI 会自动执行相应的操作。',
     ai_1_title: '任务管理',
     ai_1_content: '说"创建一个高优先级的任务"、"帮我延期这个任务"或"完成这个任务"，AI 会自动处理。',
     ai_2_title: '日程查询',
     ai_2_content: '询问"我今天有什么任务？""这周有哪些截止日期？"AI 会查询数据库并给出答案。',
     ai_3_title: '效率分析',
-    ai_3_content: 'AI 可以分析你的任务完成率、排程质量，并提供改进建议。试试说"分析一下我的工作效率"。',
+    ai_3_content:
+      'AI 可以分析你的任务完成率、排程质量，并提供改进建议。试试说"分析一下我的工作效率"。',
     ai_4_title: '操作历史',
     ai_4_content: 'AI 页面下方可以查看所有通过 AI 执行的操作历史，并支持一键撤回。',
     section_faq: '常见问题',
     faq_0_title: '如何配置 API Key？',
-    faq_0_content: '前往"设置"页面的 AI 配置区域，输入你的 Anthropic API Key 并保存。API Key 安全存储在本地数据库中。',
+    faq_0_content:
+      '前往"设置"页面的 AI 配置区域，输入你的 DeepSeek API Key 并保存。API Key 安全存储在本地数据库中。',
     faq_1_title: '为什么排程没有按预期工作？',
-    faq_1_content: '请确保任务已设置持续时间和截止日期。检查工作时段设置是否正确，以及是否有冲突的锁定任务或事件。',
+    faq_1_content:
+      '请确保任务已设置持续时间和截止日期。检查工作时段设置是否正确，以及是否有冲突的锁定任务或事件。',
     faq_2_title: '如何备份我的数据？',
     faq_2_content: '在"设置"页面底部有备份面板，你可以选择导出 JSON 备份或从备份文件恢复数据。',
     faq_3_title: 'Buddy 是什么？',
-    faq_3_content: 'Buddy 是内置在"今天"页面的智能助手，提供友好的提醒和建议。你可以在设置中调整 Buddy 的显示模式（完整/弱化/关闭）。',
+    faq_3_content:
+      'Buddy 是内置在"今天"页面的智能助手，提供友好的提醒和建议。你可以在设置中调整 Buddy 的显示模式（完整/弱化/关闭）。',
     faq_4_title: '如何撤销操作？',
-    faq_4_content: '使用 Ctrl+Z 快捷键可以快速撤销上一步操作。或者在 AI 页面的"操作历史"面板中点击"撤回"按钮。',
+    faq_4_content:
+      '使用 Ctrl+Z 快捷键可以快速撤销上一步操作。或者在 AI 页面的"操作历史"面板中点击"撤回"按钮。',
     faq_5_title: '支持哪些平台？',
-    faq_5_content: 'EvolveFlow 支持 Windows、macOS 和 Linux 平台。数据存储在本地 SQLite 数据库中，不依赖云端服务。',
+    faq_5_content:
+      'EvolveFlow 支持 Windows、macOS 和 Linux 平台。数据存储在本地 SQLite 数据库中，不依赖云端服务。',
   },
 
   // ── Floating Widget ──────────────────────────────────────────
@@ -764,7 +804,7 @@ const EN_US: TranslationDict = {
   },
 
   today: {
-    title: 'Today\'s Smart Schedule',
+    title: "Today's Smart Schedule",
     quick_add_placeholder: 'Quick add task...',
     quick_add: 'Add',
     auto_schedule: 'Auto Schedule',
@@ -774,11 +814,11 @@ const EN_US: TranslationDict = {
     due_today: 'Due today',
     due: 'Due',
     no_pending_tasks: 'No pending tasks. Create one!',
-    events_title: 'Today\'s Events',
+    events_title: "Today's Events",
     loading_events: 'Loading events...',
     no_events: 'No events today, you can arrange other tasks freely',
     reminders_title: 'Upcoming Reminders',
-    schedule_title: 'Today\'s Schedule',
+    schedule_title: "Today's Schedule",
     unknown: 'Unknown',
     no_schedule: 'No schedule yet. Click "Auto Schedule" to arrange tasks',
     ai_suggestion: 'AI Suggestion',
@@ -794,6 +834,10 @@ const EN_US: TranslationDict = {
     load_schedule_fail: 'Failed to load schedule',
     load_reminders_fail: 'Failed to load reminders',
     quick_add_fail: 'Failed to add task',
+    clear_auto_schedule: 'Clear Auto Schedule',
+    clear_schedule_fail: 'Failed to clear schedule',
+    confirm_clear_schedule:
+      'This only clears generated, unlocked schedule blocks. Locked or manually adjusted items will be kept. Continue?',
     ai_generated: 'Generated from your usage data',
     aiGenerated: 'Generated from your usage data',
     confirm_delete: 'Are you sure you want to delete this task?',
@@ -829,7 +873,8 @@ const EN_US: TranslationDict = {
     conflict: 'Conflict',
     more: 'More',
     collapse: 'Collapse',
-    drag_hint: 'Tip: drag task blocks to adjust time | 🔒 Locked | ⚠ Conflict | Click lock button to lock/unlock',
+    drag_hint:
+      'Tip: drag task blocks to adjust time | 🔒 Locked | ⚠ Conflict | Click lock button to lock/unlock',
     weekdays: ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'],
     weekday_en: ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'],
     add_event: 'Add Event',
@@ -839,6 +884,10 @@ const EN_US: TranslationDict = {
     end_time: 'End Time',
     create_error: 'Failed to create event',
     delete_error: 'Failed to delete event',
+    clear_auto_schedule: 'Clear Auto Schedule',
+    clear_schedule_error: 'Failed to clear schedule',
+    confirm_clear_schedule:
+      'This only clears generated, unlocked schedule blocks for the selected day. Locked or manually adjusted items will be kept. Continue?',
     confirm_delete_event: 'Confirm delete event?',
     delete_irreversible: 'This action cannot be undone.',
     events_section: 'Events',
@@ -950,7 +999,8 @@ const EN_US: TranslationDict = {
 
   ai: {
     title: 'AI Assistant',
-    welcome: 'Hello! I am EvolveFlow AI Assistant. I can help you manage your schedule, arrange tasks, and analyze efficiency. Try telling me what you want to do, like "Plan my work for tomorrow" or "What do I have left to do today?".',
+    welcome:
+      'Hello! I am EvolveFlow AI Assistant, powered by DeepSeek-V4-Flash. I can help you manage your schedule, arrange tasks, and analyze efficiency. Try telling me what you want to do, like "Plan my work for tomorrow" or "What do I have left to do today?".',
     check_connection: 'Checking connection...',
     ready: 'AI Ready',
     no_key: 'Configure API Key in Settings',
@@ -965,10 +1015,12 @@ const EN_US: TranslationDict = {
     input_placeholder: 'Type a message, e.g. "Plan my day" or "Analyze my efficiency"...',
     input_no_key: 'Configure API Key in Settings first...',
     input_streaming: 'AI is responding...',
-    no_key_banner: 'AI API Key not configured. Go to Settings to configure your Anthropic API Key, then return here to use the AI assistant.',
+    no_key_banner:
+      'AI API Key not configured. Go to Settings to configure your DeepSeek API Key, then return here to use the AI assistant.',
     no_key_banner_prefix: 'AI API Key not configured. Go to ',
     no_key_banner_suffix: ' to configure your API Key, then return here to use the AI assistant.',
-    offline_banner: 'AI service is currently unavailable. Check your network connection and API Key configuration.',
+    offline_banner:
+      'AI service is currently unavailable. Check your network connection and API Key configuration.',
     stream_error: 'AI response timed out. Please retry.',
     context_title: 'Current Context',
     no_action_logs: 'No action records',
@@ -1010,6 +1062,7 @@ const EN_US: TranslationDict = {
       schedule_plan_day: 'Daily Schedule',
       schedule_plan_range: 'Range Schedule',
       schedule_rebalance: 'Rebalance',
+      schedule_clear_day: 'Clear Auto Schedule',
       schedule_explain: 'Explain Schedule',
       reminder_snooze: 'Snooze Reminder',
       summary_generate_daily: 'Generate Daily Summary',
@@ -1030,6 +1083,11 @@ const EN_US: TranslationDict = {
     dream_never_run: 'Never run',
     dream_last_run: 'Last {time}',
     token_label: 'Tokens',
+    model_label: 'Model',
+    tool_approval_title: 'Tool Approval',
+    yolo_confirm:
+      'Enable YOLO mode? Mutating tools and terminal tools will run without per-tool confirmation.',
+    yolo_banner: 'YOLO mode is enabled: mutating tools and terminal tools will run directly.',
     user_label: 'You',
     ai_label: 'AI',
   },
@@ -1083,7 +1141,8 @@ const EN_US: TranslationDict = {
       refreshing: 'Analyzing...',
     },
     empty: {
-      dream_hint: 'After a few days of use, insights about your productivity patterns will appear here.',
+      dream_hint:
+        'After a few days of use, insights about your productivity patterns will appear here.',
     },
     dream_footer: 'These insights are AI-generated based on your usage patterns.',
   },
@@ -1107,10 +1166,11 @@ const EN_US: TranslationDict = {
     style_tight: 'Tight (back-to-back)',
     save_preferences: 'Save Preferences',
     ai_config: 'AI Configuration',
-    api_key_label: 'Anthropic API Key',
-    api_key_desc: 'Configure your Claude API Key to enable AI assistance. The key is stored encrypted (AES-256-GCM) in the local database.',
+    api_key_label: 'DeepSeek API Key',
+    api_key_desc:
+      'Configure your DeepSeek API Key to enable AI assistance. The key is stored encrypted (AES-256-GCM) in the local database.',
     api_key_configured: 'API Key configured (ends with ...{suffix})',
-    api_key_placeholder: 'sk-ant-api03-...',
+    api_key_placeholder: 'sk-...',
     api_key_save: 'Save',
     api_key_update: 'Update',
     api_key_change: 'Change',
@@ -1131,11 +1191,13 @@ const EN_US: TranslationDict = {
     buddy_mode_full: 'Full',
     buddy_mode_minimal: 'Minimal',
     buddy_mode_off: 'Off',
-    buddy_desc: 'Full: Show all Buddy personality and suggestions / Minimal: Show only key info / Off: Hide Buddy',
+    buddy_desc:
+      'Full: Show all Buddy personality and suggestions / Minimal: Show only key info / Off: Hide Buddy',
     buddy_switched: 'Buddy switched to {mode} mode',
     keyboard_shortcuts: 'Keyboard Shortcuts',
     shortcut_desc: 'Use keyboard shortcuts for quick navigation and actions:',
-    shortcut_note: 'Note: Shortcuts do not trigger while typing in input fields (except Esc and Ctrl+Z).',
+    shortcut_note:
+      'Note: Shortcuts do not trigger while typing in input fields (except Esc and Ctrl+Z).',
     new_task: 'New task',
     toggle_ai: 'Toggle AI floating window',
     undo: 'Undo action',
@@ -1150,10 +1212,13 @@ const EN_US: TranslationDict = {
     lang_zh: '中文',
     lang_en: 'English',
     localeSwitched: 'Language switched',
-    apiKeyLabelAnthropic: 'Anthropic API Key',
+    ai_provider: 'Provider',
+    ai_model: 'Fixed model',
+    apiKeyLabelAnthropic: 'DeepSeek API Key',
     apiKeyLabelDeepseek: 'DeepSeek API Key',
-    apiKeyDescAnthropic: 'Configure your Claude API Key to enable AI assistance.',
-    apiKeyDescDeepseek: 'Configure your DeepSeek API Key to enable AI assistance. DeepSeek provides an Anthropic-compatible API interface.',
+    apiKeyDescAnthropic: 'Configure your DeepSeek API Key to enable AI assistance.',
+    apiKeyDescDeepseek:
+      'Configure your DeepSeek API Key to enable AI assistance. EvolveFlow always uses DeepSeek-V4-Flash.',
     apiKeyConfiguredLabel: '{provider} API Key saved ({prefix}...)',
     savedWorkHours: 'Work hours saved',
     saveFailed: 'Save failed: {reason}',
@@ -1162,8 +1227,8 @@ const EN_US: TranslationDict = {
     aiInitializing: 'AI engine initialized, checking connection...',
     saveApiKeyFailed: 'Failed to save API Key: {reason}',
     clearFailed: 'Clear failed: {reason}',
-    switchedProvider: 'Switched to {provider}. Please enter your new API Key.',
-    providerSwitchFailed: 'Provider switch failed: {reason}',
+    switchedProvider: 'AI provider is fixed to {provider}.',
+    providerSwitchFailed: 'AI configuration failed: {reason}',
     buddyModeFull: 'Full',
     buddyModeMinimal: 'Minimal',
     buddyModeOff: 'Off',
@@ -1225,7 +1290,8 @@ const EN_US: TranslationDict = {
     verified_no: 'Verification failed',
     unverified: 'Unverified',
     info_title: 'About Backups',
-    info_text: 'Backups contain the complete database (tasks, events, preferences) and memory data. Restoring will replace current data with the backup version. The system keeps up to 10 latest backups; the oldest one is auto-cleaned.',
+    info_text:
+      'Backups contain the complete database (tasks, events, preferences) and memory data. Restoring will replace current data with the backup version. The system keeps up to 10 latest backups; the oldest one is auto-cleaned.',
     created: 'Backup created: {name}',
     create_failed: 'Failed to create backup',
     verify_success: 'Backup integrity verified successfully',
@@ -1302,11 +1368,13 @@ const EN_US: TranslationDict = {
     session_count: '{count} sessions',
     error_already_running: 'Dream system is already running, please wait...',
     empty_title: 'Collecting data to understand your habits...',
-    empty_desc: 'The Dream system automatically analyzes your task completion and behavior patterns in the background,\ngenerating insights about productivity, energy cycles, scheduling preferences, and more.\nClick "Analyze Now" to trigger an analysis immediately.',
+    empty_desc:
+      'The Dream system automatically analyzes your task completion and behavior patterns in the background,\ngenerating insights about productivity, energy cycles, scheduling preferences, and more.\nClick "Analyze Now" to trigger an analysis immediately.',
     view_evidence: 'View Evidence',
     hide_evidence: 'Hide Evidence',
     confidence: 'Confidence: {pct}%',
-    footer: 'Insights are generated by the Dream system in the background. Each insight is valid for 30 days.',
+    footer:
+      'Insights are generated by the Dream system in the background. Each insight is valid for 30 days.',
     close: 'Close',
     categories: {
       productivity: 'Productivity',
@@ -1347,15 +1415,16 @@ const EN_US: TranslationDict = {
     start: 'Get Started',
     skip: 'Skip Tutorial',
     step2_title: 'Create Your First Task',
-    step2_desc: 'Give it a try! Type something you want to do, like "Prepare for tomorrow\'s meeting"',
-    step2_placeholder: 'e.g. Prepare for tomorrow\'s meeting',
+    step2_desc:
+      'Give it a try! Type something you want to do, like "Prepare for tomorrow\'s meeting"',
+    step2_placeholder: "e.g. Prepare for tomorrow's meeting",
     step2_create: 'Create',
     step3_title: 'Awesome!',
     step3_desc1: 'You have successfully created your first task!',
     step3_task_id: 'Task ID: {id}...',
     step3_desc2: 'Now let me schedule your day so you can see your plan.',
     step3_view_schedule: 'View My Schedule',
-    step3_no_api_key: 'You haven\'t configured an API Key yet.',
+    step3_no_api_key: "You haven't configured an API Key yet.",
     step3_go_settings: 'Go to Settings to configure',
     step3_enable_ai: ', to enable AI assistant features.',
   },
@@ -1370,13 +1439,17 @@ const EN_US: TranslationDict = {
     section_labels: ['Getting Started', 'Keyboard Shortcuts', 'AI Tips', 'FAQ'],
     section_getting_started: 'Getting Started',
     gs_0_title: 'Create Your First Task',
-    gs_0_content: 'Type a task name in the input box on the "Today" or "Tasks" page, then click "Add" to quickly create a task. You can also describe what you need directly in the AI page.',
+    gs_0_content:
+      'Type a task name in the input box on the "Today" or "Tasks" page, then click "Add" to quickly create a task. You can also describe what you need directly in the AI page.',
     gs_1_title: 'Auto Schedule',
-    gs_1_content: 'Click the "Auto Schedule" button on the "Today" page. AI will automatically arrange your day based on task priority, deadlines, and work hours.',
+    gs_1_content:
+      'Click the "Auto Schedule" button on the "Today" page. AI will automatically arrange your day based on task priority, deadlines, and work hours.',
     gs_2_title: 'Calendar View',
-    gs_2_content: 'On the "Calendar" page you can view day, week, and month views. Drag task blocks to adjust time, or lock tasks to prevent automatic adjustments.',
+    gs_2_content:
+      'On the "Calendar" page you can view day, week, and month views. Drag task blocks to adjust time, or lock tasks to prevent automatic adjustments.',
     gs_3_title: 'AI Assistant',
-    gs_3_content: 'On the AI page you can chat with Claude AI to manage your schedule, arrange tasks, and analyze efficiency. You need to configure an API Key in Settings first.',
+    gs_3_content:
+      'On the AI page you can chat with DeepSeek-V4-Flash to manage your schedule, arrange tasks, and analyze efficiency. You need to configure an API Key in Settings first.',
     section_shortcuts: 'Keyboard Shortcuts',
     sc_0_title: 'Ctrl+N',
     sc_0_content: 'New task — quickly navigate to the tasks page and prepare to create a new task.',
@@ -1392,28 +1465,39 @@ const EN_US: TranslationDict = {
     sc_5_content: 'Close modals or cancel current editing.',
     section_ai_tips: 'AI Assistant Tips',
     ai_0_title: 'Natural Language Interaction',
-    ai_0_content: 'You can tell AI "Help me plan tomorrow" or "Analyze my efficiency this week", and AI will automatically perform the actions.',
+    ai_0_content:
+      'You can tell AI "Help me plan tomorrow" or "Analyze my efficiency this week", and AI will automatically perform the actions.',
     ai_1_title: 'Task Management',
-    ai_1_content: 'Say "Create a high-priority task", "Defer this task", or "Complete this task" and AI will handle it automatically.',
+    ai_1_content:
+      'Say "Create a high-priority task", "Defer this task", or "Complete this task" and AI will handle it automatically.',
     ai_2_title: 'Schedule Queries',
-    ai_2_content: 'Ask "What tasks do I have today?" or "What deadlines are due this week?" AI will query the database and provide answers.',
+    ai_2_content:
+      'Ask "What tasks do I have today?" or "What deadlines are due this week?" AI will query the database and provide answers.',
     ai_3_title: 'Efficiency Analysis',
-    ai_3_content: 'AI can analyze your task completion rate, schedule quality, and provide improvement suggestions. Try saying "Analyze my productivity".',
+    ai_3_content:
+      'AI can analyze your task completion rate, schedule quality, and provide improvement suggestions. Try saying "Analyze my productivity".',
     ai_4_title: 'Action History',
-    ai_4_content: 'You can view the history of all AI-executed actions at the bottom of the AI page, with one-click undo support.',
+    ai_4_content:
+      'You can view the history of all AI-executed actions at the bottom of the AI page, with one-click undo support.',
     section_faq: 'FAQ',
     faq_0_title: 'How do I configure an API Key?',
-    faq_0_content: 'Go to the AI Configuration section in Settings, enter your Anthropic API Key and save. The API Key is stored securely in the local database.',
+    faq_0_content:
+      'Go to the AI Configuration section in Settings, enter your DeepSeek API Key and save. The API Key is stored securely in the local database.',
     faq_1_title: 'Why is the schedule not working as expected?',
-    faq_1_content: 'Make sure tasks have durations and deadlines set. Check that work hours are configured correctly, and there are no conflicting locked tasks or events.',
+    faq_1_content:
+      'Make sure tasks have durations and deadlines set. Check that work hours are configured correctly, and there are no conflicting locked tasks or events.',
     faq_2_title: 'How do I back up my data?',
-    faq_2_content: 'There is a backup panel at the bottom of the Settings page where you can create backups or restore from backup files.',
+    faq_2_content:
+      'There is a backup panel at the bottom of the Settings page where you can create backups or restore from backup files.',
     faq_3_title: 'What is Buddy?',
-    faq_3_content: 'Buddy is a smart assistant built into the "Today" page that provides friendly reminders and suggestions. You can adjust Buddy\'s display mode (Full/Minimal/Off) in Settings.',
+    faq_3_content:
+      'Buddy is a smart assistant built into the "Today" page that provides friendly reminders and suggestions. You can adjust Buddy\'s display mode (Full/Minimal/Off) in Settings.',
     faq_4_title: 'How do I undo an action?',
-    faq_4_content: 'Use Ctrl+Z to quickly undo the last action, or click the "Undo" button in the "Action History" panel on the AI page.',
+    faq_4_content:
+      'Use Ctrl+Z to quickly undo the last action, or click the "Undo" button in the "Action History" panel on the AI page.',
     faq_5_title: 'Which platforms are supported?',
-    faq_5_content: 'EvolveFlow supports Windows, macOS, and Linux platforms. Data is stored in a local SQLite database with no cloud dependency.',
+    faq_5_content:
+      'EvolveFlow supports Windows, macOS, and Linux platforms. Data is stored in a local SQLite database with no cloud dependency.',
   },
 
   floating: {
@@ -1513,16 +1597,12 @@ export function I18nProvider({ children }: { children: ReactNode }) {
       }
       return key;
     },
-    [locale],
+    [locale]
   );
 
   const contextValue: I18nContextValue = { locale, setLocale, t };
 
-  return React.createElement(
-    I18nContext.Provider,
-    { value: contextValue },
-    children,
-  );
+  return React.createElement(I18nContext.Provider, { value: contextValue }, children);
 }
 
 export function useI18n(): I18nContextValue {

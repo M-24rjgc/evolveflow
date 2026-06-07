@@ -101,16 +101,9 @@ describe('ScheduleService', () => {
       .prepare(
         `INSERT INTO schedule_blocks
           (id, task_id, event_id, date, start_time, end_time, locked, manual_signal, created_at, updated_at)
-         VALUES (?, NULL, NULL, ?, ?, ?, 0, 1, ?, ?)`,
+         VALUES (?, NULL, NULL, ?, ?, ?, 0, 1, ?, ?)`
       )
-      .run(
-        manualBlockId,
-        '2025-06-01',
-        '2025-06-01T09:00:00',
-        '2025-06-01T10:00:00',
-        now,
-        now,
-      );
+      .run(manualBlockId, '2025-06-01', '2025-06-01T09:00:00', '2025-06-01T10:00:00', now, now);
     const task = taskService.create({ title: 'Focused work', duration_minutes: 60 });
 
     const blocks = scheduleService.planDay('2025-06-01');
@@ -121,7 +114,27 @@ describe('ScheduleService', () => {
     expect(taskBlock).toBeDefined();
     expect(
       taskBlock!.end_time <= manualBlock!.start_time ||
-        taskBlock!.start_time >= manualBlock!.end_time,
+        taskBlock!.start_time >= manualBlock!.end_time
     ).toBe(true);
+  });
+
+  it('should clear only generated unlocked schedule blocks', () => {
+    const now = new Date().toISOString();
+    db.getDb()
+      .prepare(
+        `INSERT INTO schedule_blocks
+          (id, task_id, event_id, date, start_time, end_time, locked, manual_signal, created_at, updated_at)
+         VALUES
+          ('generated-block', NULL, NULL, '2025-06-01', '2025-06-01T09:00:00', '2025-06-01T10:00:00', 0, 0, ?, ?),
+          ('locked-block', NULL, NULL, '2025-06-01', '2025-06-01T10:00:00', '2025-06-01T11:00:00', 1, 0, ?, ?),
+          ('manual-block', NULL, NULL, '2025-06-01', '2025-06-01T11:00:00', '2025-06-01T12:00:00', 0, 1, ?, ?)`
+      )
+      .run(now, now, now, now, now, now);
+
+    const result = scheduleService.clearGeneratedSchedule('2025-06-01');
+    const ids = result.remaining.map((block) => block.id);
+
+    expect(result.cleared).toBe(1);
+    expect(ids).toEqual(['locked-block', 'manual-block']);
   });
 });

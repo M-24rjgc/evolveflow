@@ -173,6 +173,19 @@ export const CAPABILITIES: CapabilityDefinition[] = [
     mutating: true,
   },
   {
+    name: 'schedule.clear_day',
+    domain: 'schedule',
+    description:
+      'Clear generated schedule blocks for a date while keeping locked and manually adjusted blocks',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        date: { type: 'string', format: 'date' },
+      },
+    },
+    mutating: true,
+  },
+  {
     name: 'schedule.explain',
     domain: 'schedule',
     description: '解释排程原因',

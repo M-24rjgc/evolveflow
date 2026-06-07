@@ -63,6 +63,7 @@ export interface AnthropicTool {
     type: 'object';
     properties: Record<string, unknown>;
     required?: string[];
+    additionalProperties?: boolean;
   };
 }
 
@@ -82,11 +83,7 @@ export interface CreateMessageParams {
   stream?: boolean;
 }
 
-export type StopReason =
-  | 'end_turn'
-  | 'max_tokens'
-  | 'stop_sequence'
-  | 'tool_use';
+export type StopReason = 'end_turn' | 'max_tokens' | 'stop_sequence' | 'tool_use';
 
 export interface UsageInfo {
   input_tokens: number;
@@ -132,19 +129,22 @@ export interface MessageStartEvent {
 export interface ContentBlockStartEvent {
   type: 'content_block_start';
   index: number;
-  content_block: {
-    type: 'text';
-    text: '';
-  } | {
-    type: 'tool_use';
-    id: string;
-    name: string;
-    input: Record<string, unknown>;
-  } | {
-    type: 'thinking';
-    thinking: string;
-    signature: string;
-  };
+  content_block:
+    | {
+        type: 'text';
+        text: '';
+      }
+    | {
+        type: 'tool_use';
+        id: string;
+        name: string;
+        input: Record<string, unknown>;
+      }
+    | {
+        type: 'thinking';
+        thinking: string;
+        signature: string;
+      };
 }
 
 export interface TextDelta {
@@ -215,9 +215,21 @@ export interface AiSessionState {
 }
 
 export interface AiStreamChunk {
-  type: 'text_delta' | 'tool_use_start' | 'tool_use_delta' | 'tool_result' | 'thinking_delta' | 'session_start' | 'done' | 'error';
+  type:
+    | 'text_delta'
+    | 'tool_use_start'
+    | 'tool_use_delta'
+    | 'tool_result'
+    | 'tool_permission_request'
+    | 'thinking_delta'
+    | 'session_start'
+    | 'done'
+    | 'error';
   session_id: string;
   content?: string;
+  approval_id?: string;
+  capability_name?: string;
+  mutating?: boolean;
   tool_name?: string;
   tool_use_id?: string;
   tool_input?: Record<string, unknown>;
@@ -272,7 +284,10 @@ export interface ConversationContext {
  * - Must start with role "user"
  * - Roles must alternate between "user" and "assistant"
  */
-export function validateMessageAlternation(messages: MessageParam[]): { valid: boolean; error?: string } {
+export function validateMessageAlternation(messages: MessageParam[]): {
+  valid: boolean;
+  error?: string;
+} {
   if (messages.length === 0) {
     return { valid: true };
   }

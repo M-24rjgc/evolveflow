@@ -42,6 +42,14 @@ interface ToolCallRecord {
   error?: string;
 }
 
+interface PendingApproval {
+  approvalId: string;
+  capabilityName: string;
+  toolName: string;
+  toolInput?: Record<string, unknown>;
+  mutating: boolean;
+}
+
 interface ActionLog {
   id: string;
   capability: string;
@@ -63,6 +71,8 @@ const STREAM_TIMEOUT_MS = 30000;
 const MESSAGES_STORAGE_PREFIX = 'evolveflow_ai_messages_';
 const MAX_STORED_MESSAGES = 100;
 const CHECK_INTERVAL_MS = 5000;
+const AI_PROVIDER = 'DeepSeek';
+const AI_MODEL = 'deepseek-v4-flash';
 
 // ── Lightweight Markdown Renderer ───────────────────────────────
 
@@ -259,6 +269,8 @@ export default function AIPage() {
   const [contextData, setContextData] = useState<Record<string, unknown> | null>(null);
   const [tokenUsage, setTokenUsage] = useState<{ input: number; output: number }>({ input: 0, output: 0 });
   const [streamError, setStreamError] = useState<string | null>(null);
+  const [agentMode, setAgentMode] = useState<'chat' | 'plan' | 'auto' | 'yolo'>('auto');
+  const [pendingApprovals, setPendingApprovals] = useState<PendingApproval[]>([]);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -318,6 +330,26 @@ export default function AIPage() {
                 toolName: chunk.tool_name || 'unknown',
                 toolInput: chunk.tool_input,
                 status: 'running',
+              });
+            }
+            break;
+          }
+          case 'tool_permission_request': {
+            if (chunk.approval_id) {
+              setPendingApprovals((prev) => {
+                if (prev.some((item) => item.approvalId === chunk.approval_id)) {
+                  return prev;
+                }
+                return [
+                  ...prev,
+                  {
+                    approvalId: chunk.approval_id!,
+                    capabilityName: chunk.capability_name || chunk.tool_name || 'unknown',
+                    toolName: chunk.tool_name || 'unknown',
+                    toolInput: chunk.tool_input,
+                    mutating: !!chunk.mutating,
+                  },
+                ];
               });
             }
             break;
@@ -457,7 +489,7 @@ export default function AIPage() {
 
   async function checkAiStatus() {
     try {
-      const result = await callCapability('ai.check_connectivity', {}) as { connected?: boolean; reason?: string };
+      const result = await callCapability('ai.check_connectivity', { force: true }) as { connected?: boolean; reason?: string };
       if (result.connected) {
         setAiStatus('ready');
       } else if (result.reason?.includes('not initialized')) {
@@ -490,22 +522,8 @@ export default function AIPage() {
         cancelAnimationFrame(rafIdRef.current);
         rafIdRef.current = null;
       }
-      // Also flush any accumulated text/thinking chunks synchronously.
       flushPendingChunks();
-      // Direct handling for done/error to ensure the streaming flag updates promptly.
-      if (chunk.type === 'done') {
-        setIsStreaming(false);
-        if (chunk.usage) {
-          setTokenUsage((prev) => ({
-            input: prev.input + (chunk.usage?.input_tokens || 0),
-            output: prev.output + (chunk.usage?.output_tokens || 0),
-          }));
-        }
-        loadActionLogs();
-        loadContext();
-      } else if (chunk.type === 'error') {
-        setIsStreaming(false);
-      }
+      setIsStreaming(false);
     }
   }, [flushPendingChunks]);
 
@@ -537,41 +555,22 @@ export default function AIPage() {
       const result = await callCapability('ai.stream', {
         message: userMsg,
         session_id: sessionId,
-      }) as { session_id?: string; streaming?: boolean };
+        mode: agentMode,
+      }) as { streaming?: boolean; error?: string; session_id?: string };
 
-      if (!result.streaming) {
-        // Fallback to non-streaming
-        const fallback = await callCapability('ai.chat', {
-          message: userMsg,
-          session_id: sessionId,
-        }) as { text?: string; error?: string; session_id?: string };
-
-        const text = fallback.text;
-        if (text) {
-          setMessages((prev) => [
-            ...prev,
-            {
-              id: `ai_${Date.now()}`,
-              role: 'assistant' as const,
-              content: text,
-              timestamp: Date.now(),
-            },
-          ]);
-        }
-        if (fallback.error) {
-          setMessages((prev) => [
-            ...prev,
-            {
-              id: `err_${Date.now()}`,
-              role: 'system',
-              content: t('ai.error_format', { message: fallback.error || '' }),
-              timestamp: Date.now(),
-            },
-          ]);
-        }
-        setIsStreaming(false);
-        loadActionLogs();
-        loadContext();
+      if (result.session_id) {
+        setCurrentSessionId(result.session_id);
+      }
+      if (result.error) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `err_${Date.now()}`,
+            role: 'system',
+            content: t('ai.error_format', { message: result.error || '' }),
+            timestamp: Date.now(),
+          },
+        ]);
       }
     } catch (err) {
       setMessages((prev) => [
@@ -605,6 +604,23 @@ export default function AIPage() {
       }
       return updated;
     });
+  }
+
+  async function handleToolApproval(approvalId: string, allow: boolean) {
+    setPendingApprovals((prev) => prev.filter((item) => item.approvalId !== approvalId));
+    try {
+      await callCapability('ai.approve_tool', { approval_id: approvalId, allow });
+    } catch (err) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `approval_err_${Date.now()}`,
+          role: 'system',
+          content: `${t('ai.request_failed')}: ${err instanceof Error ? err.message : String(err)}`,
+          timestamp: Date.now(),
+        },
+      ]);
+    }
   }
 
   // ── Data Loading ─────────────────────────────────────────────
@@ -673,6 +689,16 @@ export default function AIPage() {
     inputRef.current?.focus();
   }
 
+  function handleModeChange(nextMode: 'chat' | 'plan' | 'auto' | 'yolo') {
+    if (nextMode === 'yolo' && agentMode !== 'yolo') {
+      const confirmed = window.confirm(t('ai.yolo_confirm'));
+      if (!confirmed) {
+        return;
+      }
+    }
+    setAgentMode(nextMode);
+  }
+
   // ── Render Helpers ───────────────────────────────────────────
 
   function formatToolName(name: string): string {
@@ -712,6 +738,20 @@ export default function AIPage() {
         actions={
           <>
             {statusBadge()}
+            <span className="status-badge">
+              <Sparkles size={13} />
+              {AI_PROVIDER} · {AI_MODEL}
+            </span>
+            <select
+              value={agentMode}
+              onChange={(event) => handleModeChange(event.target.value as 'chat' | 'plan' | 'auto' | 'yolo')}
+              aria-label="AI mode"
+            >
+              <option value="chat">Chat</option>
+              <option value="plan">Plan</option>
+              <option value="auto">Auto</option>
+              <option value="yolo">YOLO</option>
+            </select>
             {(tokenUsage.input > 0 || tokenUsage.output > 0) && (
               <span className="status-badge">
                 <Sparkles size={13} />
@@ -746,6 +786,7 @@ export default function AIPage() {
 
       <div className="metric-grid">
         <MetricCard label={t('ai.ready')} value={aiStatus === 'ready' ? t('analytics.status_good') : aiStatus === 'checking' ? '...' : t('ai.offline')} hint={t('ai.check_connection')} tone={aiStatus === 'ready' ? 'good' : aiStatus === 'checking' ? undefined : 'warn'} />
+        <MetricCard label={t('ai.model_label')} value={AI_MODEL} hint={AI_PROVIDER} />
         <MetricCard label={t('ai.dream_label')} value={dreamStatus?.sessionCount ?? 0} hint={dreamStatus?.lastDreamTime ? t('ai.dream_last_run', { time: new Date(dreamStatus.lastDreamTime).toLocaleString(locale) }) : t('ai.dream_never_run')} />
         <MetricCard label={t('ai.token_label')} value={(tokenUsage.input + tokenUsage.output).toLocaleString()} hint={`${tokenUsage.input} / ${tokenUsage.output}`} />
         <MetricCard label={t('ai.action_history')} value={actionLogs.length} hint={t('ai.undo')} />
@@ -801,6 +842,40 @@ export default function AIPage() {
             {t('common.close')}
           </button>
         </div>
+      )}
+
+      {agentMode === 'yolo' && (
+        <div className="card" style={{
+          padding: '8px 12px',
+          marginBottom: 12,
+          background: '#fff3e0',
+          border: '1px solid #ffcc80',
+          fontSize: 13,
+        }}>
+          <CircleAlert size={16} style={{ verticalAlign: '-3px', marginRight: 6 }} />
+          {t('ai.yolo_banner')}
+        </div>
+      )}
+
+      {pendingApprovals.length > 0 && (
+        <Panel title={t('ai.tool_approval_title')} icon={<CircleAlert size={17} />}>
+          {pendingApprovals.map((approval) => (
+            <div key={approval.approvalId} className="tool-log-row">
+              <span>
+                <strong>{approval.capabilityName}</strong>
+                <span className="field-help" style={{ marginLeft: 8 }}>
+                  {JSON.stringify(approval.toolInput || {}).slice(0, 120)}
+                </span>
+              </span>
+              <button className="btn btn-primary" onClick={() => { void handleToolApproval(approval.approvalId, true); }}>
+                {t('common.confirm')}
+              </button>
+              <button className="btn btn-secondary" onClick={() => { void handleToolApproval(approval.approvalId, false); }}>
+                {t('common.cancel')}
+              </button>
+            </div>
+          ))}
+        </Panel>
       )}
 
       {/* Context Panel */}

@@ -44,23 +44,22 @@ export function capabilitiesToTools(registry: CapabilityRegistry): AnthropicTool
       properties?: Record<string, unknown>;
       required?: string[];
     };
-    const hasRequired = !!(schema.required?.length);
-    const hasNonEmptyProps = !!(
-      schema.properties &&
-      Object.keys(schema.properties).length > 0
-    );
+    const properties = sanitizeJsonSchemaProperties(schema.properties || {});
+    const required = Array.isArray(schema.required)
+      ? schema.required.filter((key) => Object.prototype.hasOwnProperty.call(properties, key))
+      : [];
 
-    const input_schema: { type: 'object'; properties: Record<string, unknown>; required?: string[]; additionalProperties?: boolean } = {
+    const input_schema: {
+      type: 'object';
+      properties: Record<string, unknown>;
+      required?: string[];
+      additionalProperties?: boolean;
+    } = {
       type: 'object' as const,
-      properties: (schema.properties || {}) as Record<string, unknown>,
+      properties,
+      required,
+      additionalProperties: false,
     };
-
-    if (hasRequired) {
-      input_schema.required = schema.required;
-      if (hasNonEmptyProps) {
-        input_schema.additionalProperties = false;
-      }
-    }
 
     return {
       name: capabilityToToolName(cap.name),
@@ -68,6 +67,52 @@ export function capabilitiesToTools(registry: CapabilityRegistry): AnthropicTool
       input_schema,
     };
   });
+}
+
+function sanitizeJsonSchemaProperties(
+  properties: Record<string, unknown>
+): Record<string, unknown> {
+  const sanitized: Record<string, unknown> = {};
+
+  for (const [key, value] of Object.entries(properties)) {
+    sanitized[key] = sanitizeJsonSchemaValue(value);
+  }
+
+  return sanitized;
+}
+
+function sanitizeJsonSchemaValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(sanitizeJsonSchemaValue);
+  }
+
+  if (!value || typeof value !== 'object') {
+    return value;
+  }
+
+  const input = value as Record<string, unknown>;
+  const output: Record<string, unknown> = {};
+  const unsupportedStrictKeys = new Set(['default', 'examples', '$schema', '$id']);
+
+  for (const [key, child] of Object.entries(input)) {
+    if (unsupportedStrictKeys.has(key)) {
+      continue;
+    }
+
+    if (key === 'properties' && child && typeof child === 'object' && !Array.isArray(child)) {
+      output.properties = sanitizeJsonSchemaProperties(child as Record<string, unknown>);
+      continue;
+    }
+
+    if (key === 'additionalProperties') {
+      output.additionalProperties = child === false ? false : undefined;
+      continue;
+    }
+
+    output[key] = sanitizeJsonSchemaValue(child);
+  }
+
+  return Object.fromEntries(Object.entries(output).filter(([, child]) => child !== undefined));
 }
 
 /** Build a detailed description for the LLM including domain context */
@@ -124,7 +169,9 @@ export function getToolListingPrompt(registry: CapabilityRegistry): string {
       grouped.set(cap.domain, []);
     }
     const toolName = capabilityToToolName(cap.name);
-    grouped.get(cap.domain)!.push(`- **${toolName}**: ${cap.description}${cap.mutating ? ' (会修改数据)' : ' (只读)'}`);
+    grouped
+      .get(cap.domain)!
+      .push(`- **${toolName}**: ${cap.description}${cap.mutating ? ' (会修改数据)' : ' (只读)'}`);
   }
 
   for (const [domain, toolLines] of grouped) {

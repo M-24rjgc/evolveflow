@@ -1,15 +1,11 @@
 /**
- * Multi-provider Messages API HTTP client (Anthropic + DeepSeek).
+ * DeepSeek Messages API HTTP client.
  * Uses native fetch() + ReadableStream for SSE streaming.
  * Zero SDK dependency — completely self-contained.
  *
  * Supports:
- *  - Anthropic Messages API (https://api.anthropic.com)
  *  - DeepSeek Anthropic-compatible endpoint (https://api.deepseek.com/anthropic)
- *    DeepSeek's endpoint accepts the same Messages API format. Note:
- *    DeepSeek may not support all Anthropic-specific features (cache_control,
- *    thinking with specific budget_tokens format). For DeepSeek, use
- *    thinking: { type: 'enabled' } without budget_tokens.
+ *  - Fixed model: deepseek-v4-flash
  *
  * Features:
  *  - Streaming SSE parse with backpressure handling
@@ -17,7 +13,7 @@
  *  - Request timeout management
  *  - API key validation
  *  - Error classification and structured error propagation
- *  - Provider-specific configuration (thinking, headers, models)
+ *  - DeepSeek-compatible thinking and tool-call configuration
  */
 
 import type {
@@ -29,12 +25,9 @@ import type {
   SystemMessageParam,
   UsageInfo,
 } from './types.js';
+import { DEEPSEEK_ANTHROPIC_BASE_URL, DEEPSEEK_MODEL } from './deepseek.js';
 
-const ANTHROPIC_BASE_URL = 'https://api.anthropic.com';
-const DEEPSEEK_BASE_URL = 'https://api.deepseek.com/anthropic';
-const ANTHROPIC_VERSION = '2023-06-01';
-export const DEFAULT_ANTHROPIC_MODEL = 'claude-sonnet-4-20250514';
-export const DEFAULT_DEEPSEEK_MODEL = 'deepseek-v4-flash';
+export const DEFAULT_DEEPSEEK_MODEL = DEEPSEEK_MODEL;
 const DEFAULT_MAX_TOKENS = 8192;
 const DEFAULT_TIMEOUT_MS = 120_000;
 const MAX_RETRIES = 3;
@@ -44,11 +37,14 @@ const MAX_CONSECUTIVE_SSE_FAILURES = 10;
 
 export interface ClientConfig {
   apiKey: string;
+  /** @deprecated EvolveFlow always uses the official DeepSeek Anthropic-compatible endpoint. */
   baseUrl?: string;
+  /** @deprecated EvolveFlow always uses deepseek-v4-flash. */
   model?: string;
   maxTokens?: number;
   timeoutMs?: number;
   maxRetries?: number;
+  /** @deprecated EvolveFlow only supports DeepSeek. */
   provider?: 'anthropic' | 'deepseek';
 }
 
@@ -75,16 +71,14 @@ export class ApiClient {
   private apiKey: string;
   private baseUrl: string;
   private model: string;
-  private provider: 'anthropic' | 'deepseek';
   private maxTokens: number;
   private timeoutMs: number;
   private maxRetries: number;
 
   constructor(config: ClientConfig) {
     this.apiKey = config.apiKey;
-    this.provider = config.provider || 'deepseek';
-    this.baseUrl = config.baseUrl || (this.provider === 'deepseek' ? DEEPSEEK_BASE_URL : ANTHROPIC_BASE_URL);
-    this.model = config.model || (this.provider === 'deepseek' ? DEFAULT_DEEPSEEK_MODEL : DEFAULT_ANTHROPIC_MODEL);
+    this.baseUrl = DEEPSEEK_ANTHROPIC_BASE_URL;
+    this.model = DEEPSEEK_MODEL;
     this.maxTokens = config.maxTokens || DEFAULT_MAX_TOKENS;
     this.timeoutMs = config.timeoutMs || DEFAULT_TIMEOUT_MS;
     this.maxRetries = config.maxRetries ?? MAX_RETRIES;
@@ -96,8 +90,8 @@ export class ApiClient {
   }
 
   /** Get the current provider. */
-  getProvider(): 'anthropic' | 'deepseek' {
-    return this.provider;
+  getProvider(): 'deepseek' {
+    return 'deepseek';
   }
 
   /** Get the API base URL currently used by this client. */
@@ -106,15 +100,11 @@ export class ApiClient {
   }
 
   /**
-   * Get provider-appropriate thinking configuration.
-   * Anthropic requires budget_tokens; DeepSeek uses thinking without budget_tokens
-   * (DeepSeek uses reasoning_effort instead of budget_tokens).
+   * Get DeepSeek-compatible thinking configuration.
+   * DeepSeek accepts thinking enabled/disabled and ignores Anthropic budget_tokens.
    */
-  getThinkingConfig(budgetTokens: number = 2000): { type: 'enabled'; budget_tokens?: number } | { type: 'disabled' } {
-    if (this.provider === 'deepseek') {
-      return { type: 'enabled' };
-    }
-    return { type: 'enabled', budget_tokens: budgetTokens };
+  getThinkingConfig(_budgetTokens: number = 2000): { type: 'enabled' } | { type: 'disabled' } {
+    return { type: 'enabled' };
   }
 
   /** Send a non-streaming message. Returns complete response. */
@@ -128,14 +118,18 @@ export class ApiClient {
       temperature?: number;
       toolChoice?: CreateMessageParams['tool_choice'];
       thinking?: CreateMessageParams['thinking'];
-    },
+    }
   ): Promise<ClientResult> {
     const params: CreateMessageParams = {
-      model: options?.model || this.model,
+      model: this.model,
       max_tokens: options?.maxTokens || this.maxTokens,
       messages,
       ...(tools && tools.length > 0 ? { tools } : {}),
-      ...(options?.toolChoice ? { tool_choice: options.toolChoice } : tools?.length ? { tool_choice: { type: 'auto' } } : {}),
+      ...(options?.toolChoice
+        ? { tool_choice: options.toolChoice }
+        : tools?.length
+          ? { tool_choice: { type: 'auto' } }
+          : {}),
       ...(systemPrompt ? { system: this.normalizeSystemPrompt(systemPrompt) } : {}),
       ...(options?.temperature !== undefined ? { temperature: options.temperature } : {}),
       ...(options?.thinking ? { thinking: options.thinking } : {}),
@@ -174,14 +168,18 @@ export class ApiClient {
       toolChoice?: CreateMessageParams['tool_choice'];
       thinking?: CreateMessageParams['thinking'];
     },
-    externalSignal?: AbortSignal,
+    externalSignal?: AbortSignal
   ): AsyncGenerator<StreamEvent> {
     const params: CreateMessageParams = {
-      model: options?.model || this.model,
+      model: this.model,
       max_tokens: options?.maxTokens || this.maxTokens,
       messages,
       ...(tools && tools.length > 0 ? { tools } : {}),
-      ...(options?.toolChoice ? { tool_choice: options.toolChoice } : tools?.length ? { tool_choice: { type: 'auto' } } : {}),
+      ...(options?.toolChoice
+        ? { tool_choice: options.toolChoice }
+        : tools?.length
+          ? { tool_choice: { type: 'auto' } }
+          : {}),
       ...(systemPrompt ? { system: this.normalizeSystemPrompt(systemPrompt) } : {}),
       ...(options?.temperature !== undefined ? { temperature: options.temperature } : {}),
       ...(options?.thinking ? { thinking: options.thinking } : {}),
@@ -214,7 +212,11 @@ export class ApiClient {
         if (!response.ok) {
           const errorBody = await response.text().catch(() => '');
           const retryAfterHeader = response.headers.get('Retry-After');
-          const { retryable, error, retryAfterSeconds } = this.classifyError(response.status, errorBody, retryAfterHeader);
+          const { retryable, error, retryAfterSeconds } = this.classifyError(
+            response.status,
+            errorBody,
+            retryAfterHeader
+          );
           if (retryable && attempt <= this.maxRetries) {
             const delay = this.calculateBackoff(attempt, retryAfterSeconds);
             await this.sleep(delay);
@@ -235,7 +237,9 @@ export class ApiClient {
         try {
           while (true) {
             const { done, value } = await reader.read();
-            if (done) {break;}
+            if (done) {
+              break;
+            }
 
             buffer += decoder.decode(value, { stream: true });
             const lines = buffer.split('\n');
@@ -243,7 +247,9 @@ export class ApiClient {
 
             for (const line of lines) {
               const trimmed = line.trim();
-              if (!trimmed) {continue;}
+              if (!trimmed) {
+                continue;
+              }
 
               // SSE format: "event: <type>" followed by "data: <json>"
               if (trimmed.startsWith('event:')) {
@@ -253,7 +259,9 @@ export class ApiClient {
               const dataMatch = trimmed.match(/^data:\s*(.+)$/);
               if (dataMatch) {
                 const jsonStr = dataMatch[1].trim();
-                if (!jsonStr) {continue;}
+                if (!jsonStr) {
+                  continue;
+                }
 
                 try {
                   const event: StreamEvent = JSON.parse(jsonStr);
@@ -261,9 +269,16 @@ export class ApiClient {
                   consecutiveSseFailures = 0;
                 } catch {
                   consecutiveSseFailures++;
-                  console.warn(`[ApiClient] Failed to parse SSE data line (failure #${consecutiveSseFailures}): ${jsonStr.slice(0, 200)}`);
+                  console.warn(
+                    `[ApiClient] Failed to parse SSE data line (failure #${consecutiveSseFailures}): ${jsonStr.slice(0, 200)}`
+                  );
                   if (consecutiveSseFailures >= MAX_CONSECUTIVE_SSE_FAILURES) {
-                    throw new ApiError(0, 'sse_parse_error', `SSE parsing failed for ${MAX_CONSECUTIVE_SSE_FAILURES} consecutive data lines`, false);
+                    throw new ApiError(
+                      0,
+                      'sse_parse_error',
+                      `SSE parsing failed for ${MAX_CONSECUTIVE_SSE_FAILURES} consecutive data lines`,
+                      false
+                    );
                   }
                 }
               }
@@ -281,7 +296,9 @@ export class ApiClient {
                   yield event;
                 } catch {
                   consecutiveSseFailures++;
-                  console.warn(`[ApiClient] Failed to parse remaining SSE data: ${jsonStr.slice(0, 200)}`);
+                  console.warn(
+                    `[ApiClient] Failed to parse remaining SSE data: ${jsonStr.slice(0, 200)}`
+                  );
                 }
               }
             }
@@ -305,7 +322,12 @@ export class ApiClient {
         }
 
         if (err instanceof DOMException && err.name === 'AbortError') {
-          const apiErr = new ApiError(408, 'timeout', `Request timed out after ${this.timeoutMs}ms`, true);
+          const apiErr = new ApiError(
+            408,
+            'timeout',
+            `Request timed out after ${this.timeoutMs}ms`,
+            true
+          );
           if (attempt <= this.maxRetries) {
             const delay = this.calculateBackoff(attempt);
             await this.sleep(delay);
@@ -322,7 +344,12 @@ export class ApiClient {
           continue;
         }
 
-        throw new ApiError(0, 'network_error', `Network error: ${err instanceof Error ? err.message : String(err)}`, true);
+        throw new ApiError(
+          0,
+          'network_error',
+          `Network error: ${err instanceof Error ? err.message : String(err)}`,
+          true
+        );
       } finally {
         if (externalSignal) {
           externalSignal.removeEventListener('abort', onAbort);
@@ -338,7 +365,7 @@ export class ApiClient {
         [{ role: 'user', content: 'Reply with OK.' }],
         undefined,
         undefined,
-        { maxTokens: 8, temperature: 0 },
+        { maxTokens: 8, temperature: 0 }
       );
       return true;
     } catch {
@@ -349,20 +376,16 @@ export class ApiClient {
   // ── Private Helpers ──────────────────────────────────────────
 
   private buildHeaders(): Record<string, string> {
-    const headers: Record<string, string> = {
+    return {
       'Content-Type': 'application/json',
       'x-api-key': this.apiKey,
     };
-    // Anthropic-specific headers (omitted for DeepSeek which uses its own API)
-    if (this.provider === 'anthropic') {
-      headers['anthropic-version'] = ANTHROPIC_VERSION;
-      headers['anthropic-beta'] = 'messages-2023-12-15';
-    }
-    return headers;
   }
 
-  private normalizeSystemPrompt(systemPrompt: string | SystemMessageParam[]): string | SystemMessageParam[] {
-    if (this.provider !== 'deepseek' || typeof systemPrompt === 'string') {
+  private normalizeSystemPrompt(
+    systemPrompt: string | SystemMessageParam[]
+  ): string | SystemMessageParam[] {
+    if (typeof systemPrompt === 'string') {
       return systemPrompt;
     }
 
@@ -372,7 +395,11 @@ export class ApiClient {
     }));
   }
 
-  private async fetchWithRetry(path: string, init: RequestInit, attempt: number = 1): Promise<string> {
+  private async fetchWithRetry(
+    path: string,
+    init: RequestInit,
+    attempt: number = 1
+  ): Promise<string> {
     const url = `${this.baseUrl}${path}`;
 
     try {
@@ -386,7 +413,11 @@ export class ApiClient {
 
         if (!response.ok) {
           const retryAfterHeader = response.headers.get('Retry-After');
-          const { retryable, error, retryAfterSeconds } = this.classifyError(response.status, body, retryAfterHeader);
+          const { retryable, error, retryAfterSeconds } = this.classifyError(
+            response.status,
+            body,
+            retryAfterHeader
+          );
           if (retryable && attempt <= this.maxRetries) {
             const delay = this.calculateBackoff(attempt, retryAfterSeconds);
             await this.sleep(delay);
@@ -400,7 +431,9 @@ export class ApiClient {
         clearTimeout(timeoutId);
       }
     } catch (err) {
-      if (err instanceof ApiError) {throw err;}
+      if (err instanceof ApiError) {
+        throw err;
+      }
       if (attempt <= this.maxRetries) {
         const delay = this.calculateBackoff(attempt);
         await this.sleep(delay);
@@ -410,7 +443,11 @@ export class ApiClient {
     }
   }
 
-  private classifyError(status: number, body: string, retryAfterHeader?: string | null): { retryable: boolean; error: ApiError; retryAfterSeconds: number | null } {
+  private classifyError(
+    status: number,
+    body: string,
+    retryAfterHeader?: string | null
+  ): { retryable: boolean; error: ApiError; retryAfterSeconds: number | null } {
     let code = 'unknown';
     let message = body;
 

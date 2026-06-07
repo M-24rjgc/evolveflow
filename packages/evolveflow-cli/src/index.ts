@@ -4,6 +4,15 @@ import { EvolveFlowDatabase, ensureDataDirs } from '@evolveflow/storage';
 import { createRegistry } from '@evolveflow/capabilities';
 import * as path from 'path';
 import * as os from 'os';
+import * as readline from 'readline';
+import {
+  createCliAgent,
+  DEEPSEEK_ANTHROPIC_BASE_URL,
+  DEEPSEEK_MODEL,
+  DEEPSEEK_PROVIDER,
+  type AgentMode,
+  type ToolPermissionRequest,
+} from './agent.js';
 
 function getDataDir(): string {
   const base = path.join(os.homedir(), '.evolveflow', 'app-data');
@@ -14,6 +23,13 @@ function getDataDir(): string {
 function getDb(): EvolveFlowDatabase {
   const dataDir = getDataDir();
   return new EvolveFlowDatabase(path.join(dataDir, 'evolveflow.db'));
+}
+
+function localDateString(date: Date = new Date()): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
 }
 
 function outputJson(data: unknown): void {
@@ -38,10 +54,259 @@ function outputHuman(data: unknown): void {
 }
 
 const program = new Command();
-program.name('evolveflow').description('EvolveFlow 智能日程助手 CLI').version('0.1.0');
+program
+  .name('evolveflow')
+  .description('EvolveFlow 本地 Agent CLI')
+  .version('0.1.0')
+  .option('-p, --prompt <message>', '单次向 DeepSeek-V4-Flash Agent 提问')
+  .option('--mode <mode>', 'Agent 模式: chat | plan | auto | yolo', 'chat')
+  .hook('preAction', (thisCommand, actionCommand) => {
+    if (actionCommand.name() === thisCommand.name()) {
+      return;
+    }
+  });
 
 const jsonFlag = '--json';
-const cliAiContext = { actor: 'ai' as const, origin: 'cli' as const };
+
+const VALID_AGENT_MODES = new Set<AgentMode>(['chat', 'plan', 'auto', 'yolo']);
+
+function parseAgentMode(value: unknown): AgentMode {
+  const mode = String(value || 'chat').toLowerCase() as AgentMode;
+  return VALID_AGENT_MODES.has(mode) ? mode : 'chat';
+}
+
+function printAgentHeader(mode: AgentMode): void {
+  console.log(`EvolveFlow Agent`);
+  console.log(`Provider: ${DEEPSEEK_PROVIDER}`);
+  console.log(`Model: ${DEEPSEEK_MODEL}`);
+  console.log(`Mode: ${formatMode(mode)}`);
+  console.log(`Base URL: ${DEEPSEEK_ANTHROPIC_BASE_URL}`);
+}
+
+function formatMode(mode: AgentMode): string {
+  return mode === 'yolo' ? 'YOLO' : mode.charAt(0).toUpperCase() + mode.slice(1);
+}
+
+function printHelp(): void {
+  console.log(
+    [
+      '命令:',
+      '  /status        查看 DeepSeek 连接与模型状态',
+      '  /connect       显示 API Key 配置方式',
+      '  /mode <mode>   切换模式: chat | plan | auto | yolo',
+      '  /clear         清屏并开始新会话',
+      '  /help          查看帮助',
+      '  /exit          退出',
+    ].join('\n')
+  );
+}
+
+function printConnectHelp(): void {
+  console.log(
+    [
+      'DeepSeek 连接配置:',
+      '  1. 桌面端: 设置 -> AI 配置 -> 保存 DeepSeek API Key',
+      '  2. 终端环境变量: EVOLVEFLOW_AI_KEY 或 DEEPSEEK_API_KEY',
+      `  固定 Provider: ${DEEPSEEK_PROVIDER}`,
+      `  固定 Model: ${DEEPSEEK_MODEL}`,
+      `  固定 Base URL: ${DEEPSEEK_ANTHROPIC_BASE_URL}`,
+    ].join('\n')
+  );
+}
+
+async function runPromptOnce(message: string, mode: AgentMode): Promise<void> {
+  const agent = createCliAgent();
+  try {
+    if (!agent.status.configured) {
+      console.error(
+        'DeepSeek API Key 未配置。请设置 EVOLVEFLOW_AI_KEY / DEEPSEEK_API_KEY，或在桌面端设置页保存 API Key。'
+      );
+      process.exitCode = 1;
+      return;
+    }
+
+    const result = await agent.runPrompt(message, { mode });
+    if (result.text.trim()) {
+      console.log(result.text.trim());
+    }
+    if (result.error) {
+      console.error(result.error);
+      process.exitCode = 1;
+    }
+  } finally {
+    agent.close();
+  }
+}
+
+async function runInteractive(initialMode: AgentMode): Promise<void> {
+  const agent = createCliAgent();
+  let mode = initialMode;
+  let sessionId = `cli_${Date.now()}`;
+  let pendingPrompt = false;
+
+  try {
+    printAgentHeader(mode);
+    if (!agent.status.configured) {
+      console.log(
+        'DeepSeek API Key 未配置。请设置 EVOLVEFLOW_AI_KEY / DEEPSEEK_API_KEY，或在桌面端设置页保存 API Key。'
+      );
+    } else {
+      console.log(
+        `API Key: ${agent.status.keySource}${agent.status.keySuffix ? ` (...${agent.status.keySuffix})` : ''}`
+      );
+    }
+    printHelp();
+
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+      prompt: `\n${formatMode(mode)} > `,
+    });
+
+    const ask = () => rl.prompt();
+    let lineQueue = Promise.resolve();
+    ask();
+
+    rl.on('line', (line) => {
+      const input = line.trim();
+      lineQueue = lineQueue
+        .then(async () => {
+          if (!input) {
+            ask();
+            return;
+          }
+
+          if (input === '/exit' || input === '/quit') {
+            rl.close();
+            return;
+          }
+
+          if (input === '/help') {
+            printHelp();
+            ask();
+            return;
+          }
+
+          if (input === '/connect') {
+            printConnectHelp();
+            ask();
+            return;
+          }
+
+          if (input === '/clear') {
+            console.clear();
+            sessionId = `cli_${Date.now()}`;
+            printAgentHeader(mode);
+            ask();
+            return;
+          }
+
+          if (input === '/status') {
+            console.log(`Provider: ${DEEPSEEK_PROVIDER}`);
+            console.log(`Model: ${DEEPSEEK_MODEL}`);
+            console.log(`Mode: ${formatMode(mode)}`);
+            console.log(`Base URL: ${DEEPSEEK_ANTHROPIC_BASE_URL}`);
+            console.log(
+              `API Key: ${agent.status.configured ? `${agent.status.keySource} (...${agent.status.keySuffix})` : 'not configured'}`
+            );
+            if (agent.status.configured) {
+              const connected = await agent.checkConnectivity();
+              console.log(`Connection: ${connected ? 'ok' : 'failed'}`);
+            }
+            ask();
+            return;
+          }
+
+          if (input.startsWith('/mode')) {
+            const nextMode = parseAgentMode(input.split(/\s+/)[1]);
+            mode = nextMode;
+            console.log(`Mode: ${formatMode(mode)}`);
+            if (mode === 'yolo') {
+              console.log('YOLO 模式已显式开启：写入工具和终端工具将不再逐项确认。');
+            }
+            ask();
+            return;
+          }
+
+          if (!agent.status.configured) {
+            console.log('DeepSeek API Key 未配置，无法发起 AI 请求。');
+            ask();
+            return;
+          }
+
+          let wroteText = false;
+          try {
+            const result = await agent.runPrompt(input, {
+              mode,
+              sessionId,
+              stream: true,
+              confirmToolUse: async (request) => {
+                if (!request.mutating) {
+                  return true;
+                }
+                pendingPrompt = true;
+                try {
+                  const allowed = await askToolApproval(rl, request);
+                  return {
+                    allow: allowed,
+                    reason: allowed ? undefined : `用户拒绝执行工具: ${request.capabilityName}`,
+                  };
+                } finally {
+                  pendingPrompt = false;
+                }
+              },
+              onChunk: (chunk) => {
+                if (chunk.type === 'text_delta' && chunk.content) {
+                  process.stdout.write(chunk.content);
+                  wroteText = true;
+                } else if (chunk.type === 'tool_use_start') {
+                  process.stdout.write(`\n[tool] ${chunk.tool_name}\n`);
+                } else if (chunk.type === 'tool_permission_request' && mode === 'auto') {
+                  process.stdout.write(
+                    `\n[approval] ${chunk.capability_name || chunk.tool_name}\n`
+                  );
+                } else if (chunk.type === 'tool_result') {
+                  process.stdout.write(`[tool done] ${chunk.tool_name || chunk.tool_use_id}\n`);
+                }
+              },
+            });
+
+            if (!wroteText && result.text.trim()) {
+              process.stdout.write(result.text.trim());
+            }
+            if (result.error) {
+              process.stdout.write(`\n${result.error}`);
+            }
+            process.stdout.write('\n');
+          } catch (err) {
+            console.error(err instanceof Error ? err.message : String(err));
+          }
+          if (!pendingPrompt) {
+            ask();
+          }
+        })
+        .catch((err) => {
+          console.error(err instanceof Error ? err.message : String(err));
+          ask();
+        });
+    });
+
+    await new Promise<void>((resolve) => {
+      rl.on('close', resolve);
+    });
+  } finally {
+    agent.close();
+  }
+}
+
+function askToolApproval(rl: readline.Interface, request: ToolPermissionRequest): Promise<boolean> {
+  return new Promise((resolve) => {
+    const inputPreview = JSON.stringify(request.input).slice(0, 500);
+    rl.question(`允许执行写入工具 ${request.capabilityName}? ${inputPreview} [y/N] `, (answer) => {
+      resolve(answer.trim().toLowerCase() === 'y' || answer.trim().toLowerCase() === 'yes');
+    });
+  });
+}
 
 program
   .command('task')
@@ -58,14 +323,22 @@ program
       .action(async (opts) => {
         const db = getDb();
         const registry = createRegistry(db);
-        const result = await registry.invoke('task.create', {
-          title: opts.title,
-          duration_minutes: opts.duration ? parseInt(opts.duration) : undefined,
-          due_date: opts.due,
-          tags: opts.tags ? opts.tags.split(',') : undefined,
-          project: opts.project,
-        }, { actor: 'cli', origin: 'cli' });
-        if (opts.json) {outputJson(result);} else {outputHuman(result.data);}
+        const result = await registry.invoke(
+          'task.create',
+          {
+            title: opts.title,
+            duration_minutes: opts.duration ? parseInt(opts.duration) : undefined,
+            due_date: opts.due,
+            tags: opts.tags ? opts.tags.split(',') : undefined,
+            project: opts.project,
+          },
+          { actor: 'cli', origin: 'cli' }
+        );
+        if (opts.json) {
+          outputJson(result);
+        } else {
+          outputHuman(result.data);
+        }
         db.close();
       })
   )
@@ -82,15 +355,23 @@ program
       .action(async (opts) => {
         const db = getDb();
         const registry = createRegistry(db);
-        const result = await registry.invoke('task.update', {
-          task_id: opts.id,
-          title: opts.title,
-          duration_minutes: opts.duration ? parseInt(opts.duration) : undefined,
-          due_date: opts.due,
-          tags: opts.tags ? opts.tags.split(',') : undefined,
-          project: opts.project,
-        }, { actor: 'cli', origin: 'cli' });
-        if (opts.json) {outputJson(result);} else {outputHuman(result.data);}
+        const result = await registry.invoke(
+          'task.update',
+          {
+            task_id: opts.id,
+            title: opts.title,
+            duration_minutes: opts.duration ? parseInt(opts.duration) : undefined,
+            due_date: opts.due,
+            tags: opts.tags ? opts.tags.split(',') : undefined,
+            project: opts.project,
+          },
+          { actor: 'cli', origin: 'cli' }
+        );
+        if (opts.json) {
+          outputJson(result);
+        } else {
+          outputHuman(result.data);
+        }
         db.close();
       })
   )
@@ -102,10 +383,18 @@ program
       .action(async (opts) => {
         const db = getDb();
         const registry = createRegistry(db);
-        const result = await registry.invoke('task.list', {
-          status: opts.status,
-        }, { actor: 'cli', origin: 'cli' });
-        if (opts.json) {outputJson(result);} else {outputHuman(result.data);}
+        const result = await registry.invoke(
+          'task.list',
+          {
+            status: opts.status,
+          },
+          { actor: 'cli', origin: 'cli' }
+        );
+        if (opts.json) {
+          outputJson(result);
+        } else {
+          outputHuman(result.data);
+        }
         db.close();
       })
   )
@@ -117,8 +406,16 @@ program
       .action(async (opts) => {
         const db = getDb();
         const registry = createRegistry(db);
-        const result = await registry.invoke('task.complete', { task_id: opts.id }, { actor: 'cli', origin: 'cli' });
-        if (opts.json) {outputJson(result);} else {outputHuman(result.data);}
+        const result = await registry.invoke(
+          'task.complete',
+          { task_id: opts.id },
+          { actor: 'cli', origin: 'cli' }
+        );
+        if (opts.json) {
+          outputJson(result);
+        } else {
+          outputHuman(result.data);
+        }
         db.close();
       })
   );
@@ -136,12 +433,20 @@ program
       .action(async (opts) => {
         const db = getDb();
         const registry = createRegistry(db);
-        const result = await registry.invoke('event.create', {
-          title: opts.title,
-          start_time: opts.start,
-          end_time: opts.end,
-        }, { actor: 'cli', origin: 'cli' });
-        if (opts.json) {outputJson(result);} else {outputHuman(result.data);}
+        const result = await registry.invoke(
+          'event.create',
+          {
+            title: opts.title,
+            start_time: opts.start,
+            end_time: opts.end,
+          },
+          { actor: 'cli', origin: 'cli' }
+        );
+        if (opts.json) {
+          outputJson(result);
+        } else {
+          outputHuman(result.data);
+        }
         db.close();
       })
   )
@@ -156,13 +461,21 @@ program
       .action(async (opts) => {
         const db = getDb();
         const registry = createRegistry(db);
-        const result = await registry.invoke('event.update', {
-          event_id: opts.id,
-          title: opts.title,
-          start_time: opts.start,
-          end_time: opts.end,
-        }, { actor: 'cli', origin: 'cli' });
-        if (opts.json) {outputJson(result);} else {outputHuman(result.data);}
+        const result = await registry.invoke(
+          'event.update',
+          {
+            event_id: opts.id,
+            title: opts.title,
+            start_time: opts.start,
+            end_time: opts.end,
+          },
+          { actor: 'cli', origin: 'cli' }
+        );
+        if (opts.json) {
+          outputJson(result);
+        } else {
+          outputHuman(result.data);
+        }
         db.close();
       })
   );
@@ -182,16 +495,56 @@ program
         const registry = createRegistry(db);
         let result;
         if (opts.rangeStart && opts.rangeEnd) {
-          result = await registry.invoke('schedule.plan_range', {
-            start_date: opts.rangeStart,
-            end_date: opts.rangeEnd,
-          }, { actor: 'cli', origin: 'cli' });
+          result = await registry.invoke(
+            'schedule.plan_range',
+            {
+              start_date: opts.rangeStart,
+              end_date: opts.rangeEnd,
+            },
+            { actor: 'cli', origin: 'cli' }
+          );
         } else {
-          result = await registry.invoke('schedule.plan_day', {
-            date: opts.date ?? new Date().toISOString().split('T')[0],
-          }, { actor: 'cli', origin: 'cli' });
+          result = await registry.invoke(
+            'schedule.plan_day',
+            {
+              date: opts.date ?? localDateString(),
+            },
+            { actor: 'cli', origin: 'cli' }
+          );
         }
-        if (opts.json) {outputJson(result);} else {outputHuman(result.data);}
+        if (opts.json) {
+          outputJson(result);
+        } else {
+          outputHuman(result.data);
+        }
+        db.close();
+      })
+  )
+  .addCommand(
+    new Command('clear')
+      .description('Clear generated schedule blocks for a date')
+      .option('--date <date>', 'Date, defaults to today')
+      .option(jsonFlag, 'JSON output', false)
+      .action(async (opts) => {
+        const db = getDb();
+        const registry = createRegistry(db);
+        const date = opts.date ?? localDateString();
+        const result = await registry.invoke(
+          'schedule.clear_day',
+          { date },
+          { actor: 'cli', origin: 'cli' }
+        );
+        if (opts.json) {
+          outputJson(result);
+        } else if (result.success) {
+          const data = result.data as { cleared?: number; date?: string } | undefined;
+          console.log(
+            `Cleared ${data?.cleared ?? 0} generated schedule block(s) for ${data?.date ?? date}.`
+          );
+        } else {
+          console.error(result.error ?? 'Failed to clear schedule.');
+          process.exitCode = 1;
+        }
         db.close();
       })
   );
@@ -204,54 +557,57 @@ program
   .action(async (opts) => {
     const db = getDb();
     const registry = createRegistry(db);
-    const result = await registry.invoke('history.list_actions', {
-      limit: parseInt(opts.limit),
-    }, { actor: 'cli', origin: 'cli' });
-    if (opts.json) {outputJson(result);} else {outputHuman(result.data);}
+    const result = await registry.invoke(
+      'history.list_actions',
+      {
+        limit: parseInt(opts.limit),
+      },
+      { actor: 'cli', origin: 'cli' }
+    );
+    if (opts.json) {
+      outputJson(result);
+    } else {
+      outputHuman(result.data);
+    }
     db.close();
   });
 
 program
   .command('ai')
-  .description('与 AI 对话（受限模式）')
+  .description('与 DeepSeek-V4-Flash Agent 对话')
   .argument('<message>', '消息内容')
+  .option('--mode <mode>', 'Agent 模式: chat | plan | auto | yolo', 'chat')
   .option(jsonFlag, 'JSON 输出', false)
   .action(async (message: string, opts) => {
-    const db = getDb();
-    const registry = createRegistry(db);
-
-    const lower = message.toLowerCase();
-    let result;
-
-    try {
-      if (lower.includes('创建任务') || lower.includes('添加任务') || lower.includes('新建任务')) {
-        const titleMatch = message.match(/(?:创建|添加|新建)(?:任务|一个任务)[：:]?\s*(.+)/);
-        const title = titleMatch ? titleMatch[1].trim() : message;
-        result = await registry.invoke('task.create', { title }, cliAiContext);
-      } else if (lower.includes('查看任务') || lower.includes('任务列表') || lower.includes('所有任务')) {
-        result = await registry.invoke('task.list', {}, cliAiContext);
-      } else if (lower.includes('排程') || lower.includes('安排')) {
-        result = await registry.invoke('schedule.plan_day', { date: new Date().toISOString().split('T')[0] }, cliAiContext);
-      } else if (lower.includes('历史') || lower.includes('记录')) {
-        result = await registry.invoke('history.list_actions', { limit: 20 }, cliAiContext);
-      } else {
-        result = { success: false, message: '无法理解该命令。支持的操作：创建任务、查看任务、排程、查看历史记录' };
+    const mode = parseAgentMode(opts.mode);
+    if (opts.json) {
+      const agent = createCliAgent();
+      try {
+        const result = await agent.runPrompt(message, { mode });
+        outputJson({
+          provider: DEEPSEEK_PROVIDER,
+          model: DEEPSEEK_MODEL,
+          mode,
+          ...result,
+        });
+      } finally {
+        agent.close();
       }
-
-      if (opts.json) {outputJson(result);}
-      else {
-        if (result.success) {
-          outputHuman(result.data || result);
-        } else {
-          console.log((result as { message?: string }).message || '命令执行失败');
-        }
-      }
-    } catch (err) {
-      console.error('AI command error:', err);
-      if (!opts.json) {console.log('执行 AI 命令时出错，请稍后重试');}
+      return;
     }
-
-    db.close();
+    await runPromptOnce(message, mode);
   });
 
-program.parse();
+program.action(async (opts) => {
+  const mode = parseAgentMode(opts.mode);
+  if (opts.prompt) {
+    await runPromptOnce(opts.prompt, mode);
+    return;
+  }
+  await runInteractive(mode);
+});
+
+program.parseAsync().catch((err) => {
+  console.error(err instanceof Error ? err.message : String(err));
+  process.exitCode = 1;
+});

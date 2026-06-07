@@ -31,7 +31,7 @@ class PerformanceLogger {
     if (elapsed > this.thresholdMs) {
       console.warn(
         `[PerformanceLogger] ${this.label} took ${elapsed.toFixed(2)}ms ` +
-        `(threshold: ${this.thresholdMs}ms)`,
+          `(threshold: ${this.thresholdMs}ms)`
       );
     }
     return elapsed;
@@ -41,7 +41,7 @@ class PerformanceLogger {
   static async trace<T>(
     label: string,
     fn: () => Promise<T>,
-    thresholdMs: number = 100,
+    thresholdMs: number = 100
   ): Promise<T> {
     const logger = new PerformanceLogger(label, thresholdMs);
     logger.start();
@@ -53,11 +53,7 @@ class PerformanceLogger {
   }
 
   /** Helper: wrap a sync function with timing. */
-  static traceSync<T>(
-    label: string,
-    fn: () => T,
-    thresholdMs: number = 100,
-  ): T {
+  static traceSync<T>(label: string, fn: () => T, thresholdMs: number = 100): T {
     const logger = new PerformanceLogger(label, thresholdMs);
     logger.start();
     try {
@@ -93,6 +89,12 @@ export interface PlanDayResult {
   scheduled: ScheduleBlock[];
   /** Tasks that could not be scheduled, with reasons. */
   deferred: DeferredTask[];
+}
+
+export interface ClearScheduleResult {
+  date: string;
+  cleared: number;
+  remaining: ScheduleBlock[];
 }
 
 /**
@@ -168,7 +170,7 @@ export interface ScheduleQualityMetrics {
 /** Internal representation of an available time slot. */
 interface TimeSlot {
   start: string; // ISO datetime string
-  end: string;   // ISO datetime string
+  end: string; // ISO datetime string
   remainingMinutes: number;
 }
 
@@ -205,7 +207,7 @@ export class ScheduleService {
     db: Database.Database,
     taskService: TaskService,
     eventService: EventService,
-    preferenceService?: PreferenceService,
+    preferenceService?: PreferenceService
   ) {
     this.db = db;
     this.taskService = taskService;
@@ -295,10 +297,12 @@ export class ScheduleService {
    * @returns        Explanation object or null if not found.
    */
   explain(blockId: string): ScheduleExplanation | null {
-    const block = this.db
-      .prepare('SELECT * FROM schedule_blocks WHERE id = ?')
-      .get(blockId) as Record<string, unknown> | undefined;
-    if (!block) {return null;}
+    const block = this.db.prepare('SELECT * FROM schedule_blocks WHERE id = ?').get(blockId) as
+      | Record<string, unknown>
+      | undefined;
+    if (!block) {
+      return null;
+    }
 
     const reasons: string[] = [];
     const keyFactors: string[] = [];
@@ -341,11 +345,26 @@ export class ScheduleService {
    */
   getDaySchedule(date: string): ScheduleBlock[] {
     const rows = this.db
-      .prepare(
-        'SELECT * FROM schedule_blocks WHERE date = ? ORDER BY start_time',
-      )
+      .prepare('SELECT * FROM schedule_blocks WHERE date = ? ORDER BY start_time')
       .all(date) as Record<string, unknown>[];
     return rows.map((r) => this.mapRowToBlock(r));
+  }
+
+  /**
+   * Clear generated, unlocked schedule blocks for a day.
+   *
+   * Locked blocks and manual adjustments are preserved so user-curated plans
+   * and fixed calendar items survive cleanup.
+   */
+  clearGeneratedSchedule(date: string): ClearScheduleResult {
+    return this.db.transaction(() => {
+      const cleared = this.clearDaySchedule(date);
+      return {
+        date,
+        cleared,
+        remaining: this.getDaySchedule(date),
+      };
+    })();
   }
 
   // ════════════════════════════════════════════════════════════════════════════
@@ -385,10 +404,7 @@ export class ScheduleService {
    * @param preferences  Optional tuning parameters.
    * @returns            `{ scheduled, deferred }` result.
    */
-  planDayOptimized(
-    date: string,
-    preferences?: SchedulingPreferences,
-  ): PlanDayResult {
+  planDayOptimized(date: string, preferences?: SchedulingPreferences): PlanDayResult {
     const logger = new PerformanceLogger(`planDayOptimized(${date})`, 100);
     logger.start();
 
@@ -404,10 +420,7 @@ export class ScheduleService {
       const eventBlocks = this.createEventBlocks(events, date, preservedBlocks);
 
       // Build initial occupied slots from locked/manual blocks + events.
-      const occupiedSlots = this.computeOccupiedSlots(date, [
-        ...preservedBlocks,
-        ...eventBlocks,
-      ]);
+      const occupiedSlots = this.computeOccupiedSlots(date, [...preservedBlocks, ...eventBlocks]);
 
       // ── 2. Compute available slots ──
       const availableSlots = this.getAvailableSlots(date, occupiedSlots);
@@ -415,10 +428,14 @@ export class ScheduleService {
       // ── 3. Load tasks and compute priority scores ──
       const allTasks = this.taskService.list({ status: 'pending' });
       const schedulableTasks = allTasks.filter((t) => {
-        if (t.locked) {return false;}
+        if (t.locked) {
+          return false;
+        }
         if (t.parent_task_id) {
           const subTasks = this.taskService.getSubTasks(t.parent_task_id);
-          if (subTasks.length > 0) {return false;}
+          if (subTasks.length > 0) {
+            return false;
+          }
         }
         return true;
       });
@@ -427,11 +444,7 @@ export class ScheduleService {
       const completionRates = this.loadProjectCompletionRates();
 
       const scoredTasks: TaskPriority[] = schedulableTasks.map((t) => {
-        const breakdown = this.computePriorityBreakdown(
-          t,
-          date,
-          completionRates,
-        );
+        const breakdown = this.computePriorityBreakdown(t, date, completionRates);
         return {
           task: t,
           priorityScore:
@@ -443,17 +456,16 @@ export class ScheduleService {
       // Sort descending by priority score, with stable tiebreaker.
       scoredTasks.sort((a, b) => {
         const scoreDiff = b.priorityScore - a.priorityScore;
-        if (scoreDiff !== 0) {return scoreDiff;}
+        if (scoreDiff !== 0) {
+          return scoreDiff;
+        }
         return a.task.created_at.localeCompare(b.task.created_at);
       });
 
       // ── 4. Resolve preferences with fallbacks ──
-      const bufferMinutes =
-        preferences?.bufferMinutes ?? this.getBufferPreference() ?? 5;
-      const preferMorning =
-        preferences?.preferMorningForDeadlineTasks ?? true;
-      const respectEnergy =
-        preferences?.respectEnergyPatterns ?? true;
+      const bufferMinutes = preferences?.bufferMinutes ?? this.getBufferPreference() ?? 5;
+      const preferMorning = preferences?.preferMorningForDeadlineTasks ?? true;
+      const respectEnergy = preferences?.respectEnergyPatterns ?? true;
 
       let energyPatterns: EnergyPatterns | null = null;
       if (respectEnergy) {
@@ -482,7 +494,7 @@ export class ScheduleService {
           bufferMinutes,
           preferMorning,
           energyPatterns,
-          priorityScore,
+          priorityScore
         );
 
         if (bestSlot) {
@@ -515,19 +527,14 @@ export class ScheduleService {
 
       // ── 6. Gap-filling pass ──
       // Collect gaps (available slots) that are >= 15 minutes.
-      const gapFillResults = this.gapFillingPass(
-        availableSlots,
-        deferred,
-        date,
-        now,
-      );
+      const gapFillResults = this.gapFillingPass(availableSlots, deferred, date, now);
       for (const result of gapFillResults) {
         scheduled.push(result);
         // Remove the task from deferred.
-        const idx = deferred.findIndex(
-          (d) => d.taskId === result.task_id,
-        );
-        if (idx >= 0) {deferred.splice(idx, 1);}
+        const idx = deferred.findIndex((d) => d.taskId === result.task_id);
+        if (idx >= 0) {
+          deferred.splice(idx, 1);
+        }
       }
 
       return { scheduled, deferred };
@@ -555,9 +562,7 @@ export class ScheduleService {
       this.clearDaySchedule(date);
 
       const lockedRows = this.db
-        .prepare(
-          'SELECT * FROM schedule_blocks WHERE date = ? AND locked = 1',
-        )
+        .prepare('SELECT * FROM schedule_blocks WHERE date = ? AND locked = 1')
         .all(date) as Record<string, unknown>[];
       const lockedBlocks = lockedRows.map((r) => this.mapRowToBlock(r));
 
@@ -568,10 +573,14 @@ export class ScheduleService {
 
       const tasks = this.taskService.list({ status: 'pending' });
       const schedulableTasks = tasks.filter((t) => {
-        if (t.locked) {return false;}
+        if (t.locked) {
+          return false;
+        }
         if (t.parent_task_id) {
           const subTasks = this.taskService.getSubTasks(t.parent_task_id);
-          if (subTasks.length > 0) {return false;}
+          if (subTasks.length > 0) {
+            return false;
+          }
         }
         return t.duration_minutes && t.duration_minutes > 0;
       });
@@ -600,9 +609,15 @@ export class ScheduleService {
       const availableSlots = this.getAvailableSlots(date, occupiedSlots);
 
       const sortedTasks = [...schedulableTasks].sort((a, b) => {
-        if (a.due_date && b.due_date) {return a.due_date.localeCompare(b.due_date);}
-        if (a.due_date) {return -1;}
-        if (b.due_date) {return 1;}
+        if (a.due_date && b.due_date) {
+          return a.due_date.localeCompare(b.due_date);
+        }
+        if (a.due_date) {
+          return -1;
+        }
+        if (b.due_date) {
+          return 1;
+        }
         return 0;
       });
 
@@ -660,8 +675,7 @@ export class ScheduleService {
     const workHours = this.resolveWorkHours();
     const workStart = `${date}T${workHours.start}:00`;
     const workEnd = `${date}T${workHours.end}:00`;
-    const totalWorkMinutes =
-      (new Date(workEnd).getTime() - new Date(workStart).getTime()) / 60000;
+    const totalWorkMinutes = (new Date(workEnd).getTime() - new Date(workStart).getTime()) / 60000;
 
     // Separate task blocks from event blocks.
     const taskBlocks = blocks.filter((b) => b.task_id);
@@ -669,18 +683,12 @@ export class ScheduleService {
 
     // Total minutes occupied by tasks.
     const scheduledMinutes = blocks.reduce((acc, b) => {
-      return (
-        acc +
-        (new Date(b.end_time).getTime() - new Date(b.start_time).getTime()) /
-          60000
-      );
+      return acc + (new Date(b.end_time).getTime() - new Date(b.start_time).getTime()) / 60000;
     }, 0);
 
     // Compute utilization rate.
     const utilizationRate =
-      totalWorkMinutes > 0
-        ? Math.round((scheduledMinutes / totalWorkMinutes) * 100)
-        : 0;
+      totalWorkMinutes > 0 ? Math.round((scheduledMinutes / totalWorkMinutes) * 100) : 0;
 
     // Compute fragmentation score.
     // Fragmentation = number of discrete task blocks / total task minutes * 100
@@ -690,10 +698,8 @@ export class ScheduleService {
         ? Math.min(
             100,
             Math.round(
-              ((taskBlocks.length - 1) /
-                Math.max(1, taskBlocks.length + eventBlocks.length)) *
-                100,
-            ),
+              ((taskBlocks.length - 1) / Math.max(1, taskBlocks.length + eventBlocks.length)) * 100
+            )
           )
         : 0;
 
@@ -704,33 +710,28 @@ export class ScheduleService {
     let totalPrioritySum = 0;
 
     for (const task of allTasks) {
-      if (task.locked || task.parent_task_id) {continue;}
+      if (task.locked || task.parent_task_id) {
+        continue;
+      }
       const priority = this.computeEffectivePriority(task, date, completionRates);
       totalPrioritySum += priority;
-      const isScheduled = taskBlocks.some(
-        (b) => b.task_id === task.id && b.date === date,
-      );
+      const isScheduled = taskBlocks.some((b) => b.task_id === task.id && b.date === date);
       if (isScheduled) {
         scheduledPrioritySum += priority;
       }
     }
 
     const priorityWeightedCompletionPotential =
-      totalPrioritySum > 0
-        ? Math.round((scheduledPrioritySum / totalPrioritySum) * 100)
-        : 0;
+      totalPrioritySum > 0 ? Math.round((scheduledPrioritySum / totalPrioritySum) * 100) : 0;
 
     // Compute average buffer between task blocks.
-    const sortedBlocks = [...blocks].sort((a, b) =>
-      a.start_time.localeCompare(b.start_time),
-    );
+    const sortedBlocks = [...blocks].sort((a, b) => a.start_time.localeCompare(b.start_time));
     let totalGapMinutes = 0;
     let gapCount = 0;
     for (let i = 1; i < sortedBlocks.length; i++) {
       const prevEnd = sortedBlocks[i - 1].end_time;
       const currStart = sortedBlocks[i].start_time;
-      const gap =
-        (new Date(currStart).getTime() - new Date(prevEnd).getTime()) / 60000;
+      const gap = (new Date(currStart).getTime() - new Date(prevEnd).getTime()) / 60000;
       if (gap > 0 && gap < 120) {
         // Ignore gaps larger than 2 hours (likely lunch / breaks).
         totalGapMinutes += gap;
@@ -742,13 +743,10 @@ export class ScheduleService {
 
     return {
       date,
-      totalTasks: allTasks.filter(
-        (t) => !t.locked && !t.parent_task_id,
-      ).length,
+      totalTasks: allTasks.filter((t) => !t.locked && !t.parent_task_id).length,
       scheduledCount: taskBlocks.length,
-      deferredCount: allTasks.filter(
-        (t) => !t.locked && !t.parent_task_id,
-      ).length - taskBlocks.length,
+      deferredCount:
+        allTasks.filter((t) => !t.locked && !t.parent_task_id).length - taskBlocks.length,
       utilizationRate,
       fragmentationScore,
       priorityWeightedCompletionPotential,
@@ -773,7 +771,7 @@ export class ScheduleService {
   getOptimalSlots(
     date: string,
     tasks: Task[],
-    preferences?: SchedulingPreferences,
+    preferences?: SchedulingPreferences
   ): SlotScoreDetail[] {
     const preservedBlocks = this.getPreservedBlocks(date);
     const events = this.eventService.list({
@@ -781,32 +779,23 @@ export class ScheduleService {
       end: `${date}T23:59:59`,
     });
     const eventBlocks = this.createEventBlocks(events, date, preservedBlocks, false);
-    const occupiedSlots = this.computeOccupiedSlots(date, [
-      ...preservedBlocks,
-      ...eventBlocks,
-    ]);
+    const occupiedSlots = this.computeOccupiedSlots(date, [...preservedBlocks, ...eventBlocks]);
     const availableSlots = this.getAvailableSlots(date, occupiedSlots);
-    const bufferMinutes =
-      preferences?.bufferMinutes ?? this.getBufferPreference() ?? 5;
-    const preferMorning =
-      preferences?.preferMorningForDeadlineTasks ?? true;
-    const energyPatterns = preferences?.respectEnergyPatterns
-      ? this.loadEnergyPatterns()
-      : null;
+    const bufferMinutes = preferences?.bufferMinutes ?? this.getBufferPreference() ?? 5;
+    const preferMorning = preferences?.preferMorningForDeadlineTasks ?? true;
+    const energyPatterns = preferences?.respectEnergyPatterns ? this.loadEnergyPatterns() : null;
     const completionRates = this.loadProjectCompletionRates();
 
     const results: SlotScoreDetail[] = [];
 
     for (const task of tasks) {
-      const priorityScore = this.computeEffectivePriority(
-        task,
-        date,
-        completionRates,
-      );
+      const priorityScore = this.computeEffectivePriority(task, date, completionRates);
       const duration = task.duration_minutes ?? 0;
 
       for (const slot of availableSlots) {
-        if (slot.remainingMinutes < duration) {continue;}
+        if (slot.remainingMinutes < duration) {
+          continue;
+        }
 
         const slotStart = slot.start;
         const taskEnd = this.addMinutes(slotStart, duration);
@@ -823,7 +812,7 @@ export class ScheduleService {
           duration,
           preferMorning,
           energyPatterns,
-          priorityScore,
+          priorityScore
         );
 
         results.push({
@@ -872,12 +861,15 @@ export class ScheduleService {
   private computePriorityBreakdown(
     task: Task,
     date: string,
-    completionRates: Map<string, { completed: number; total: number }>,
+    completionRates: Map<string, { completed: number; total: number }>
   ): { base: number; urgency: number; dependency: number; completionHistory: number } {
     // ── Base score from time_effect_type ──
     let base = 5; // continuous
-    if (task.time_effect_type === 'deadline') {base = 10;}
-    else if (task.time_effect_type === 'event_bound') {base = 8;}
+    if (task.time_effect_type === 'deadline') {
+      base = 10;
+    } else if (task.time_effect_type === 'event_bound') {
+      base = 8;
+    }
 
     // ── Urgency bonus ──
     let urgency = 0;
@@ -894,9 +886,7 @@ export class ScheduleService {
     }
     // Check if this task has children that are pending.
     const subTasks = this.taskService.getSubTasks(task.id);
-    const hasPendingChildren = subTasks.some(
-      (s) => s.status === 'pending',
-    );
+    const hasPendingChildren = subTasks.some((s) => s.status === 'pending');
     if (hasPendingChildren) {
       dependency += 5;
     }
@@ -907,9 +897,13 @@ export class ScheduleService {
       const stats = completionRates.get(task.project);
       if (stats && stats.total > 0) {
         const rate = stats.completed / stats.total;
-        if (rate > 0.8) {completionHistory = 5;}
-        else if (rate > 0.6) {completionHistory = 3;}
-        else if (rate > 0.4) {completionHistory = 1;}
+        if (rate > 0.8) {
+          completionHistory = 5;
+        } else if (rate > 0.6) {
+          completionHistory = 3;
+        } else if (rate > 0.4) {
+          completionHistory = 1;
+        }
       }
     }
 
@@ -922,7 +916,7 @@ export class ScheduleService {
   private computeEffectivePriority(
     task: Task,
     date: string,
-    completionRates: Map<string, { completed: number; total: number }>,
+    completionRates: Map<string, { completed: number; total: number }>
   ): number {
     const b = this.computePriorityBreakdown(task, date, completionRates);
     return b.base + b.urgency + b.dependency + b.completionHistory;
@@ -980,7 +974,7 @@ export class ScheduleService {
     duration: number,
     preferMorning: boolean,
     energyPatterns: EnergyPatterns | null,
-    priorityScore: number,
+    priorityScore: number
   ): {
     durationMatch: number;
     timeOfDayPreference: number;
@@ -991,11 +985,17 @@ export class ScheduleService {
     // ── 1. Duration match ──
     const ratio = duration / slot.remainingMinutes;
     let durationMatch = 0;
-    if (ratio >= 0.9) {durationMatch = 20;}
-    else if (ratio >= 0.7) {durationMatch = 15;}
-    else if (ratio >= 0.5) {durationMatch = 10;}
-    else if (ratio >= 0.25) {durationMatch = 5;}
-    else {durationMatch = 0;}
+    if (ratio >= 0.9) {
+      durationMatch = 20;
+    } else if (ratio >= 0.7) {
+      durationMatch = 15;
+    } else if (ratio >= 0.5) {
+      durationMatch = 10;
+    } else if (ratio >= 0.25) {
+      durationMatch = 5;
+    } else {
+      durationMatch = 0;
+    }
 
     // ── 2. Time-of-day preference ──
     const hour = this.getHourFromISO(slot.start);
@@ -1003,10 +1003,15 @@ export class ScheduleService {
 
     if (task.time_effect_type === 'deadline') {
       if (preferMorning) {
-        if (hour >= 8 && hour < 12) {timeOfDayPreference = 15;}
-        else if (hour >= 12 && hour < 14) {timeOfDayPreference = 8;}
-        else if (hour >= 14 && hour < 18) {timeOfDayPreference = 5;}
-        else {timeOfDayPreference = 3;}
+        if (hour >= 8 && hour < 12) {
+          timeOfDayPreference = 15;
+        } else if (hour >= 12 && hour < 14) {
+          timeOfDayPreference = 8;
+        } else if (hour >= 14 && hour < 18) {
+          timeOfDayPreference = 5;
+        } else {
+          timeOfDayPreference = 3;
+        }
       } else {
         timeOfDayPreference = 10;
       }
@@ -1016,10 +1021,15 @@ export class ScheduleService {
       if (boundEvent) {
         const eventHour = this.getHourFromISO(boundEvent.start_time);
         const hourDiff = Math.abs(hour - eventHour);
-        if (hourDiff <= 1) {timeOfDayPreference = 15;}
-        else if (hourDiff <= 2) {timeOfDayPreference = 12;}
-        else if (hourDiff <= 4) {timeOfDayPreference = 8;}
-        else {timeOfDayPreference = 4;}
+        if (hourDiff <= 1) {
+          timeOfDayPreference = 15;
+        } else if (hourDiff <= 2) {
+          timeOfDayPreference = 12;
+        } else if (hourDiff <= 4) {
+          timeOfDayPreference = 8;
+        } else {
+          timeOfDayPreference = 4;
+        }
       } else {
         timeOfDayPreference = 8;
       }
@@ -1034,16 +1044,27 @@ export class ScheduleService {
 
       if (priorityScore >= 12) {
         // High-priority task: strongly prefer peak hours.
-        if (isPeak) {energyAlignment = 10;}
-        else if (isLow) {energyAlignment = -5;}
-        else {energyAlignment = 5;}
+        if (isPeak) {
+          energyAlignment = 10;
+        } else if (isLow) {
+          energyAlignment = -5;
+        } else {
+          energyAlignment = 5;
+        }
       } else if (priorityScore >= 6) {
-        if (isPeak) {energyAlignment = 5;}
-        else if (isLow) {energyAlignment = -2;}
-        else {energyAlignment = 2;}
+        if (isPeak) {
+          energyAlignment = 5;
+        } else if (isLow) {
+          energyAlignment = -2;
+        } else {
+          energyAlignment = 2;
+        }
       } else {
-        if (isPeak) {energyAlignment = 3;}
-        else {energyAlignment = 0;}
+        if (isPeak) {
+          energyAlignment = 3;
+        } else {
+          energyAlignment = 0;
+        }
       }
     }
 
@@ -1067,9 +1088,13 @@ export class ScheduleService {
     const gapAfter = (slotEndTime - taskEndTime) / 60000;
 
     let bufferBonus = 0;
-    if (gapAfter >= 10) {bufferBonus = 5;}
-    else if (gapAfter >= 5) {bufferBonus = 3;}
-    else {bufferBonus = 0;}
+    if (gapAfter >= 10) {
+      bufferBonus = 5;
+    } else if (gapAfter >= 5) {
+      bufferBonus = 3;
+    } else {
+      bufferBonus = 0;
+    }
 
     return {
       durationMatch,
@@ -1099,17 +1124,21 @@ export class ScheduleService {
     bufferMinutes: number,
     preferMorning: boolean,
     energyPatterns: EnergyPatterns | null,
-    priorityScore: number,
+    priorityScore: number
   ): { start: string; end: string } | null {
     const duration = task.duration_minutes ?? 30;
 
-    if (slots.length === 0 || !duration || duration <= 0) {return null;}
+    if (slots.length === 0 || !duration || duration <= 0) {
+      return null;
+    }
 
     let bestSlot: { start: string; end: string } | null = null;
     let bestScore = -Infinity;
 
     for (const slot of slots) {
-      if (slot.remainingMinutes < duration) {continue;}
+      if (slot.remainingMinutes < duration) {
+        continue;
+      }
 
       const scores = this.computeSlotScores(
         task,
@@ -1117,7 +1146,7 @@ export class ScheduleService {
         duration,
         preferMorning,
         energyPatterns,
-        priorityScore,
+        priorityScore
       );
 
       const totalScore =
@@ -1162,17 +1191,21 @@ export class ScheduleService {
     slots: TimeSlot[],
     deferred: DeferredTask[],
     date: string,
-    now: string,
+    now: string
   ): ScheduleBlock[] {
     const blocks: ScheduleBlock[] = [];
 
     // Only attempt to fill tasks deferred due to 'no_fit'.
     const fillable = deferred.filter((d) => d.reason === 'no_fit');
-    if (fillable.length === 0) {return blocks;}
+    if (fillable.length === 0) {
+      return blocks;
+    }
 
     // Collect gaps >= 15 minutes.
     const gaps = slots.filter((s) => s.remainingMinutes >= 15);
-    if (gaps.length === 0) {return blocks;}
+    if (gaps.length === 0) {
+      return blocks;
+    }
 
     // Fetch full task objects.
     const tasksToFill: Array<{ task: Task; deferredEntry: DeferredTask }> = [];
@@ -1189,9 +1222,7 @@ export class ScheduleService {
     }
 
     // Sort by duration ascending (short tasks fit more easily).
-    tasksToFill.sort(
-      (a, b) => (a.task.duration_minutes ?? 0) - (b.task.duration_minutes ?? 0),
-    );
+    tasksToFill.sort((a, b) => (a.task.duration_minutes ?? 0) - (b.task.duration_minutes ?? 0));
 
     for (const { task } of tasksToFill) {
       const duration = task.duration_minutes!;
@@ -1200,10 +1231,7 @@ export class ScheduleService {
       let bestGap: TimeSlot | null = null;
       for (const gap of gaps) {
         if (gap.remainingMinutes >= duration) {
-          if (
-            !bestGap ||
-            gap.remainingMinutes < bestGap.remainingMinutes
-          ) {
+          if (!bestGap || gap.remainingMinutes < bestGap.remainingMinutes) {
             bestGap = gap;
           }
         }
@@ -1229,7 +1257,7 @@ export class ScheduleService {
         this.trimSlot(gaps, bestGap, 0);
         // Also update the original slots array (which is a reference).
         const originalSlot = slots.find(
-          (s) => s.start === bestGap!.start && s.end === bestGap!.end,
+          (s) => s.start === bestGap!.start && s.end === bestGap!.end
         );
         if (originalSlot) {
           this.trimSlot(slots, bestGap, 0);
@@ -1256,21 +1284,16 @@ export class ScheduleService {
    */
   private loadEnergyPatterns(): EnergyPatterns | null {
     const raw = this.preferenceService.get('learned_energy_patterns');
-    if (!raw) {return null;}
+    if (!raw) {
+      return null;
+    }
 
     try {
       const parsed = JSON.parse(raw);
       return {
-        peakHours: Array.isArray(parsed.peakHours)
-          ? parsed.peakHours.map(Number)
-          : [],
-        lowHours: Array.isArray(parsed.lowHours)
-          ? parsed.lowHours.map(Number)
-          : [],
-        variability:
-          typeof parsed.variability === 'string'
-            ? parsed.variability
-            : undefined,
+        peakHours: Array.isArray(parsed.peakHours) ? parsed.peakHours.map(Number) : [],
+        lowHours: Array.isArray(parsed.lowHours) ? parsed.lowHours.map(Number) : [],
+        variability: typeof parsed.variability === 'string' ? parsed.variability : undefined,
       };
     } catch {
       return null;
@@ -1286,23 +1309,17 @@ export class ScheduleService {
    *
    * @returns Map from project name to `{ completed, total }`.
    */
-  private loadProjectCompletionRates(): Map<
-    string,
-    { completed: number; total: number }
-  > {
+  private loadProjectCompletionRates(): Map<string, { completed: number; total: number }> {
     const rows = this.db
       .prepare(
         `SELECT project, status, COUNT(*) as count
          FROM tasks
          WHERE project IS NOT NULL AND project != ''
-         GROUP BY project, status`,
+         GROUP BY project, status`
       )
       .all() as Array<{ project: string; status: string; count: number }>;
 
-    const projectStats = new Map<
-      string,
-      { completed: number; total: number }
-    >();
+    const projectStats = new Map<string, { completed: number; total: number }>();
 
     for (const row of rows) {
       if (!projectStats.has(row.project)) {
@@ -1337,15 +1354,13 @@ export class ScheduleService {
   private trimSlot(
     slots: TimeSlot[],
     usedSlot: { start: string; end: string },
-    bufferMinutes: number,
+    bufferMinutes: number
   ): void {
     for (let i = 0; i < slots.length; i++) {
       const slot = slots[i];
       if (slot.start === usedSlot.start) {
         const newStart = this.addMinutes(usedSlot.end, bufferMinutes);
-        const newRemaining =
-          (new Date(slot.end).getTime() - new Date(newStart).getTime()) /
-          60000;
+        const newRemaining = (new Date(slot.end).getTime() - new Date(newStart).getTime()) / 60000;
 
         if (newRemaining < 5) {
           // Slot is effectively consumed.
@@ -1362,16 +1377,11 @@ export class ScheduleService {
   /**
    * Update the slot list after a task is placed (legacy helper).
    */
-  private updateAvailableSlots(
-    slots: TimeSlot[],
-    used: { start: string; end: string },
-  ): void {
+  private updateAvailableSlots(slots: TimeSlot[], used: { start: string; end: string }): void {
     for (const slot of slots) {
       if (slot.start === used.start) {
         const newStart = used.end;
-        const newRemaining =
-          (new Date(slot.end).getTime() - new Date(newStart).getTime()) /
-          60000;
+        const newRemaining = (new Date(slot.end).getTime() - new Date(newStart).getTime()) / 60000;
         slot.start = newStart;
         slot.remainingMinutes = newRemaining;
         break;
@@ -1388,7 +1398,7 @@ export class ScheduleService {
    */
   private computeOccupiedSlots(
     date: string,
-    blocks: ScheduleBlock[],
+    blocks: ScheduleBlock[]
   ): Array<{ start: string; end: string }> {
     return blocks
       .filter((b) => b.date === date)
@@ -1408,7 +1418,7 @@ export class ScheduleService {
    */
   private getAvailableSlots(
     date: string,
-    occupied: Array<{ start: string; end: string }>,
+    occupied: Array<{ start: string; end: string }>
   ): TimeSlot[] {
     const workHours = this.resolveWorkHours();
     const workStart = `${date}T${workHours.start}:00`;
@@ -1417,15 +1427,11 @@ export class ScheduleService {
     const slots: TimeSlot[] = [];
     let current = workStart;
 
-    const sorted = [...occupied].sort((a, b) =>
-      a.start.localeCompare(b.start),
-    );
+    const sorted = [...occupied].sort((a, b) => a.start.localeCompare(b.start));
 
     for (const occ of sorted) {
       if (current < occ.start) {
-        const minutes =
-          (new Date(occ.start).getTime() - new Date(current).getTime()) /
-          60000;
+        const minutes = (new Date(occ.start).getTime() - new Date(current).getTime()) / 60000;
         if (minutes >= 5) {
           slots.push({
             start: current,
@@ -1440,8 +1446,7 @@ export class ScheduleService {
     }
 
     if (current < workEnd) {
-      const minutes =
-        (new Date(workEnd).getTime() - new Date(current).getTime()) / 60000;
+      const minutes = (new Date(workEnd).getTime() - new Date(current).getTime()) / 60000;
       if (minutes >= 5) {
         slots.push({
           start: current,
@@ -1486,16 +1491,15 @@ export class ScheduleService {
   private findSlotForTask(
     task: Task,
     slots: TimeSlot[],
-    date: string,
+    date: string
   ): { start: string; end: string } | null {
     const duration = task.duration_minutes ?? 30;
-    if (slots.length === 0) {return null;}
+    if (slots.length === 0) {
+      return null;
+    }
 
     const isMorning = (timeStr: string): boolean => {
-      const hours = parseInt(
-        timeStr.split('T')[1]?.split(':')[0] ?? '12',
-        10,
-      );
+      const hours = parseInt(timeStr.split('T')[1]?.split(':')[0] ?? '12', 10);
       return hours >= 6 && hours < 12;
     };
 
@@ -1503,7 +1507,9 @@ export class ScheduleService {
     let bestScore = -Infinity;
 
     for (const slot of slots) {
-      if (slot.remainingMinutes < duration) {continue;}
+      if (slot.remainingMinutes < duration) {
+        continue;
+      }
 
       let score = 0;
       const ratio = duration / slot.remainingMinutes;
@@ -1516,10 +1522,7 @@ export class ScheduleService {
         score += 2;
       }
 
-      if (
-        task.time_effect_type === 'deadline' ||
-        task.due_date
-      ) {
+      if (task.time_effect_type === 'deadline' || task.due_date) {
         if (isMorning(slot.start)) {
           score += 8;
         }
@@ -1561,7 +1564,7 @@ export class ScheduleService {
   private getPreservedBlocks(date: string): ScheduleBlock[] {
     const rows = this.db
       .prepare(
-        'SELECT * FROM schedule_blocks WHERE date = ? AND (locked = 1 OR manual_signal = 1) ORDER BY start_time, created_at',
+        'SELECT * FROM schedule_blocks WHERE date = ? AND (locked = 1 OR manual_signal = 1) ORDER BY start_time, created_at'
       )
       .all(date) as Record<string, unknown>[];
     return rows.map((r) => this.mapRowToBlock(r));
@@ -1574,13 +1577,13 @@ export class ScheduleService {
     events: Event[],
     date: string,
     existingBlocks: ScheduleBlock[] = [],
-    persist = true,
+    persist = true
   ): ScheduleBlock[] {
     const now = new Date().toISOString();
     const existingEventIds = new Set(
       existingBlocks
         .map((block) => block.event_id)
-        .filter((eventId): eventId is string => !!eventId),
+        .filter((eventId): eventId is string => !!eventId)
     );
 
     return events.flatMap((event) => {
@@ -1611,7 +1614,9 @@ export class ScheduleService {
    * Find the event bound to a task (if any).
    */
   private findBoundEvent(task: Task): Event | null {
-    if (!task.id) {return null;}
+    if (!task.id) {
+      return null;
+    }
     const events = this.eventService.list();
     return events.find((e) => e.bound_task_id === task.id) ?? null;
   }
@@ -1620,19 +1625,18 @@ export class ScheduleService {
   //  PRIVATE: Helper — Persistence
   // ════════════════════════════════════════════════════════════════════════════
 
-  private clearDaySchedule(date: string): void {
-    this.db
-      .prepare(
-        'DELETE FROM schedule_blocks WHERE date = ? AND locked = 0 AND manual_signal = 0',
-      )
+  private clearDaySchedule(date: string): number {
+    const result = this.db
+      .prepare('DELETE FROM schedule_blocks WHERE date = ? AND locked = 0 AND manual_signal = 0')
       .run(date);
+    return result.changes;
   }
 
   private persistBlock(block: ScheduleBlock): void {
     this.db
       .prepare(
         `INSERT INTO schedule_blocks (id, task_id, event_id, date, start_time, end_time, locked, manual_signal, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         block.id,
@@ -1644,7 +1648,7 @@ export class ScheduleService {
         block.locked ? 1 : 0,
         block.manual_signal ? 1 : 0,
         block.created_at,
-        block.updated_at,
+        block.updated_at
       );
   }
 
@@ -1658,7 +1662,9 @@ export class ScheduleService {
    */
   private getBufferPreference(): number | null {
     const raw = this.preferenceService.get('buffer_minutes');
-    if (raw === null) {return null;}
+    if (raw === null) {
+      return null;
+    }
     const parsed = parseInt(raw, 10);
     return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
   }
@@ -1694,7 +1700,9 @@ export class ScheduleService {
    */
   private getHourFromISO(iso: string): number {
     const match = iso.split('T')[1];
-    if (!match) {return 12;}
+    if (!match) {
+      return 12;
+    }
     return parseInt(match.split(':')[0], 10) || 12;
   }
 
@@ -1712,7 +1720,7 @@ export class ScheduleService {
    */
   private getOccupiedSlots(
     date: string,
-    blocks: ScheduleBlock[],
+    blocks: ScheduleBlock[]
   ): Array<{ start: string; end: string }> {
     return blocks
       .filter((b) => b.date === date)

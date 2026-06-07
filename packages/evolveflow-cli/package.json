@@ -2,7 +2,8 @@
   "name": "@evolveflow/cli",
   "version": "0.1.0",
   "bin": {
-    "evolveflow": "./dist/index.js"
+    "evolveflow": "./dist/index.js",
+    "eflow": "./dist/index.js"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -18,6 +19,7 @@
   "dependencies": {
     "@evolveflow/capabilities": "^0.1.0",
     "@evolveflow/domain": "^0.1.0",
+    "@evolveflow/runtime": "^0.1.0",
     "@evolveflow/storage": "^0.1.0",
     "commander": "^12.0.0"
   },

@@ -85,6 +85,11 @@ function efficiencyColor(rate: number): string {
   return 'var(--danger)';
 }
 
+function completionTime(task: TaskRecord): string | undefined {
+  if (task.status !== 'completed') {return undefined;}
+  return task.completed_at || task.updated_at;
+}
+
 export default function AnalyticsPage() {
   const [tasks, setTasks] = useState<TaskRecord[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -149,10 +154,10 @@ export default function AnalyticsPage() {
         const created = task.created_at?.startsWith(date);
         const updated = task.updated_at?.startsWith(date);
         const due = task.due_date?.startsWith(date);
-        const completed = task.completed_at?.startsWith(date);
+        const completed = completionTime(task)?.startsWith(date);
         return created || updated || due || completed;
       });
-      const completed = tasks.filter((task) => task.status === 'completed' && task.completed_at?.startsWith(date));
+      const completed = tasks.filter((task) => completionTime(task)?.startsWith(date));
       const total = dayTasks.length;
       return {
         date,
@@ -187,8 +192,9 @@ export default function AnalyticsPage() {
     for (let hour = 6; hour <= 23; hour++) {hourMap.set(hour, { completed: 0, total: 0 });}
 
     for (const task of tasks) {
-      if (task.status === 'completed' && task.completed_at) {
-        const hour = parseInt(task.completed_at.slice(11, 13), 10);
+      const completedAt = completionTime(task);
+      if (completedAt) {
+        const hour = parseInt(completedAt.slice(11, 13), 10);
         if (!Number.isNaN(hour) && hourMap.has(hour)) {
           const entry = hourMap.get(hour)!;
           entry.completed++;
@@ -214,7 +220,8 @@ export default function AnalyticsPage() {
     const activeDays = new Set<string>();
     for (const task of tasks) {
       if (task.created_at) {activeDays.add(task.created_at.slice(0, 10));}
-      if (task.completed_at) {activeDays.add(task.completed_at.slice(0, 10));}
+      const completedAt = completionTime(task);
+      if (completedAt) {activeDays.add(completedAt.slice(0, 10));}
     }
     return activeDays.size > 0 ? Math.round((completedTasks.length / activeDays.size) * 10) / 10 : 0;
   }, [tasks]);

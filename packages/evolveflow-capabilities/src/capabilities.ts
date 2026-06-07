@@ -16,8 +16,28 @@ import type { TaskStatus } from '@evolveflow/domain';
 import { EvolveFlowDatabase, BackupService } from '@evolveflow/storage';
 import * as fs from 'fs';
 import * as path from 'path';
+import { exec } from 'child_process';
 
-const TASK_STATUSES: ReadonlySet<string> = new Set(['pending', 'in_progress', 'completed', 'deferred', 'cancelled']);
+const TASK_STATUSES: ReadonlySet<string> = new Set([
+  'pending',
+  'in_progress',
+  'completed',
+  'deferred',
+  'cancelled',
+]);
+const SENSITIVE_PREFERENCE_KEYS: ReadonlySet<string> = new Set(['api_key']);
+
+const isSensitivePreferenceSet = (name: string, input: Record<string, unknown>): boolean =>
+  name === 'preference.set' &&
+  typeof input.key === 'string' &&
+  SENSITIVE_PREFERENCE_KEYS.has(input.key);
+
+const localDateString = (date: Date = new Date()): string => {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
 
 export function createRegistry(db: EvolveFlowDatabase, dataDir?: string): CapabilityRegistry {
   const registry = new CapabilityRegistry();
@@ -30,13 +50,61 @@ export function createRegistry(db: EvolveFlowDatabase, dataDir?: string): Capabi
   const undoService = new UndoService(database, actionLogService);
   const summaryService = new SummaryService(database, taskService);
   const preferenceService = new PreferenceService(database);
-  const scheduleService = new ScheduleService(database, taskService, eventService, preferenceService);
+  const scheduleService = new ScheduleService(
+    database,
+    taskService,
+    eventService,
+    preferenceService
+  );
   const memoryProjectionService = new MemoryProjectionService(database, preferenceService);
 
   const backupService = dataDir ? new BackupService(db, dataDir) : undefined;
   const backupOutputDir = dataDir ? path.join(dataDir, 'backups') : undefined;
+  const workspaceRoot = path.resolve(process.env.EVOLVEFLOW_WORKSPACE_ROOT || process.cwd());
 
-  const getStateBefore = (name: string, input: Record<string, unknown>): Record<string, unknown> | undefined => {
+  const resolveWorkspacePath = (inputPath: unknown): string => {
+    if (typeof inputPath !== 'string' || !inputPath.trim()) {
+      throw new Error('path is required');
+    }
+    const rawPath = inputPath.trim();
+    const resolved = path.resolve(workspaceRoot, rawPath);
+    if (!resolved.startsWith(workspaceRoot)) {
+      throw new Error('Path must stay inside the workspace');
+    }
+    return resolved;
+  };
+
+  const getScheduleSnapshot = (date: string): Record<string, unknown> => ({
+    date,
+    blocks: JSON.stringify(scheduleService.getDaySchedule(date)),
+  });
+
+  const getScheduleRangeSnapshot = (
+    startDate: string,
+    endDate: string
+  ): Record<string, unknown> => {
+    const dates: string[] = [];
+    const blocksByDate: Record<string, string> = {};
+    const start = new Date(startDate);
+    const end = new Date(endDate);
+
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || start > end) {
+      return getScheduleSnapshot(localDateString());
+    }
+
+    for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+      const date = d.toISOString().split('T')[0];
+      dates.push(date);
+      blocksByDate[date] = JSON.stringify(scheduleService.getDaySchedule(date));
+    }
+
+    return { dates, blocksByDate };
+  };
+
+  const getStateBefore = (
+    name: string,
+    input: Record<string, unknown>
+  ): Record<string, unknown> | undefined => {
     try {
       if (name.startsWith('task.') && name !== 'task.create') {
         const taskId = input.task_id as string | undefined;
@@ -48,20 +116,37 @@ export function createRegistry(db: EvolveFlowDatabase, dataDir?: string): Capabi
         const event = eventId ? eventService.getById(eventId) : null;
         return event ? { ...event } : undefined;
       }
-      if (name === 'schedule.plan_day' || name === 'schedule.rebalance') {
-        const date = (input.date as string | undefined) ?? new Date().toISOString().split('T')[0];
-        return { date, blocks: JSON.stringify(scheduleService.getDaySchedule(date)) };
+      if (
+        name === 'schedule.plan_day' ||
+        name === 'schedule.rebalance' ||
+        name === 'schedule.clear_day'
+      ) {
+        const date = (input.date as string | undefined) ?? localDateString();
+        return getScheduleSnapshot(date);
+      }
+      if (name === 'schedule.plan_range') {
+        const startDate = input.start_date as string | undefined;
+        const endDate = input.end_date as string | undefined;
+        if (!startDate || !endDate) {
+          return undefined;
+        }
+        return getScheduleRangeSnapshot(startDate, endDate);
       }
       if (name.startsWith('reminder.')) {
         const reminderId = input.reminder_id as string | undefined;
         if (reminderId) {
-          const row = database.prepare('SELECT * FROM reminders WHERE id = ?').get(reminderId) as Record<string, unknown> | undefined;
+          const row = database.prepare('SELECT * FROM reminders WHERE id = ?').get(reminderId) as
+            | Record<string, unknown>
+            | undefined;
           return row ? { ...row } : undefined;
         }
       }
       if (name.startsWith('preference.')) {
         const key = input.key as string | undefined;
         if (key) {
+          if (SENSITIVE_PREFERENCE_KEYS.has(key)) {
+            return undefined;
+          }
           const value = preferenceService.get(key);
           return { key, value: value ?? '' };
         }
@@ -73,21 +158,34 @@ export function createRegistry(db: EvolveFlowDatabase, dataDir?: string): Capabi
   };
 
   const getStateAfter = (result: CapabilityResult): Record<string, unknown> | undefined => {
-    if (!result.data || typeof result.data !== 'object') {return undefined;}
-    if (Array.isArray(result.data)) {return { items: result.data };}
+    if (!result.data || typeof result.data !== 'object') {
+      return undefined;
+    }
+    if (Array.isArray(result.data)) {
+      return { items: result.data };
+    }
     return result.data as Record<string, unknown>;
   };
 
   const wrapMutating = (
     name: string,
-    handler: (input: Record<string, unknown>, context: CapabilityContext) => Promise<CapabilityResult>,
+    handler: (
+      input: Record<string, unknown>,
+      context: CapabilityContext
+    ) => Promise<CapabilityResult>
   ) => {
-    return async (input: Record<string, unknown>, context: CapabilityContext): Promise<CapabilityResult> => {
+    return async (
+      input: Record<string, unknown>,
+      context: CapabilityContext
+    ): Promise<CapabilityResult> => {
       const stateBefore = getStateBefore(name, input);
       const result = await handler(input, context);
       if (result.success) {
         const revision = db.incrementRevision();
         result.revision = revision;
+        if (isSensitivePreferenceSet(name, input)) {
+          return result;
+        }
         try {
           const actionLog = actionLogService.record({
             capability: name,
@@ -131,7 +229,11 @@ export function createRegistry(db: EvolveFlowDatabase, dataDir?: string): Capabi
         description: input.description as string | undefined,
         duration_minutes: input.duration_minutes as number | undefined,
         due_date: input.due_date as string | undefined,
-        time_effect_type: input.time_effect_type as 'continuous' | 'deadline' | 'event_bound' | undefined,
+        time_effect_type: input.time_effect_type as
+          | 'continuous'
+          | 'deadline'
+          | 'event_bound'
+          | undefined,
         parent_task_id: input.parent_task_id as string | undefined,
         project: input.project as string | undefined,
         tags: input.tags as string[] | undefined,
@@ -166,7 +268,11 @@ export function createRegistry(db: EvolveFlowDatabase, dataDir?: string): Capabi
           description: input.description as string | undefined,
           duration_minutes: input.duration_minutes as number | undefined,
           due_date: input.due_date as string | undefined,
-          time_effect_type: input.time_effect_type as 'continuous' | 'deadline' | 'event_bound' | undefined,
+          time_effect_type: input.time_effect_type as
+            | 'continuous'
+            | 'deadline'
+            | 'event_bound'
+            | undefined,
           project: input.project as string | undefined,
           tags: input.tags as string[] | undefined,
         });
@@ -181,7 +287,11 @@ export function createRegistry(db: EvolveFlowDatabase, dataDir?: string): Capabi
     name: 'task.complete',
     domain: 'task',
     description: '完成任务',
-    inputSchema: { type: 'object', required: ['task_id'], properties: { task_id: { type: 'string' } } },
+    inputSchema: {
+      type: 'object',
+      required: ['task_id'],
+      properties: { task_id: { type: 'string' } },
+    },
     mutating: true,
     handler: wrapMutating('task.complete', async (input) => {
       try {
@@ -205,7 +315,10 @@ export function createRegistry(db: EvolveFlowDatabase, dataDir?: string): Capabi
     mutating: true,
     handler: wrapMutating('task.defer', async (input) => {
       try {
-        const task = taskService.defer(input.task_id as string, input.new_due_date as string | undefined);
+        const task = taskService.defer(
+          input.task_id as string,
+          input.new_due_date as string | undefined
+        );
         return { success: true, data: task };
       } catch (e) {
         return { success: false, error: (e as Error).message };
@@ -233,7 +346,11 @@ export function createRegistry(db: EvolveFlowDatabase, dataDir?: string): Capabi
     name: 'task.delete',
     domain: 'task',
     description: '删除任务',
-    inputSchema: { type: 'object', required: ['task_id'], properties: { task_id: { type: 'string' } } },
+    inputSchema: {
+      type: 'object',
+      required: ['task_id'],
+      properties: { task_id: { type: 'string' } },
+    },
     mutating: true,
     handler: wrapMutating('task.delete', async (input) => {
       try {
@@ -249,7 +366,11 @@ export function createRegistry(db: EvolveFlowDatabase, dataDir?: string): Capabi
     name: 'task.cancel',
     domain: 'task',
     description: '取消任务',
-    inputSchema: { type: 'object', required: ['task_id'], properties: { task_id: { type: 'string' } } },
+    inputSchema: {
+      type: 'object',
+      required: ['task_id'],
+      properties: { task_id: { type: 'string' } },
+    },
     mutating: true,
     handler: wrapMutating('task.cancel', async (input) => {
       try {
@@ -341,7 +462,11 @@ export function createRegistry(db: EvolveFlowDatabase, dataDir?: string): Capabi
     name: 'event.delete',
     domain: 'event',
     description: '删除事件',
-    inputSchema: { type: 'object', required: ['event_id'], properties: { event_id: { type: 'string' } } },
+    inputSchema: {
+      type: 'object',
+      required: ['event_id'],
+      properties: { event_id: { type: 'string' } },
+    },
     mutating: true,
     handler: wrapMutating('event.delete', async (input) => {
       try {
@@ -360,7 +485,7 @@ export function createRegistry(db: EvolveFlowDatabase, dataDir?: string): Capabi
     inputSchema: { type: 'object', properties: { date: { type: 'string' } } },
     mutating: true,
     handler: wrapMutating('schedule.plan_day', async (input) => {
-      const date = (input.date as string) ?? new Date().toISOString().split('T')[0];
+      const date = (input.date as string) ?? localDateString();
       const blocks = scheduleService.planDay(date);
       return { success: true, data: blocks };
     }),
@@ -376,7 +501,10 @@ export function createRegistry(db: EvolveFlowDatabase, dataDir?: string): Capabi
     },
     mutating: true,
     handler: wrapMutating('schedule.plan_range', async (input) => {
-      const blocks = scheduleService.planRange(input.start_date as string, input.end_date as string);
+      const blocks = scheduleService.planRange(
+        input.start_date as string,
+        input.end_date as string
+      );
       return { success: true, data: blocks };
     }),
   });
@@ -388,9 +516,23 @@ export function createRegistry(db: EvolveFlowDatabase, dataDir?: string): Capabi
     inputSchema: { type: 'object', properties: { date: { type: 'string' } } },
     mutating: true,
     handler: wrapMutating('schedule.rebalance', async (input) => {
-      const date = (input.date as string) ?? new Date().toISOString().split('T')[0];
+      const date = (input.date as string) ?? localDateString();
       const blocks = scheduleService.rebalance(date);
       return { success: true, data: blocks };
+    }),
+  });
+
+  registry.register({
+    name: 'schedule.clear_day',
+    domain: 'schedule',
+    description:
+      'Clear generated schedule blocks for a date while keeping locked and manually adjusted blocks',
+    inputSchema: { type: 'object', properties: { date: { type: 'string' } } },
+    mutating: true,
+    handler: wrapMutating('schedule.clear_day', async (input) => {
+      const date = (input.date as string) ?? localDateString();
+      const result = scheduleService.clearGeneratedSchedule(date);
+      return { success: true, data: result };
     }),
   });
 
@@ -401,7 +543,7 @@ export function createRegistry(db: EvolveFlowDatabase, dataDir?: string): Capabi
     inputSchema: { type: 'object', properties: { date: { type: 'string' } } },
     mutating: false,
     handler: async (input) => {
-      const date = (input.date as string) ?? new Date().toISOString().split('T')[0];
+      const date = (input.date as string) ?? localDateString();
       const blocks = scheduleService.getDaySchedule(date);
       return { success: true, data: blocks };
     },
@@ -411,7 +553,10 @@ export function createRegistry(db: EvolveFlowDatabase, dataDir?: string): Capabi
     name: 'schedule.explain',
     domain: 'schedule',
     description: '解释排程原因',
-    inputSchema: { type: 'object', properties: { schedule_block_id: { type: 'string' }, date: { type: 'string' } } },
+    inputSchema: {
+      type: 'object',
+      properties: { schedule_block_id: { type: 'string' }, date: { type: 'string' } },
+    },
     mutating: false,
     handler: async (input) => {
       const explanation = scheduleService.explain(input.schedule_block_id as string);
@@ -426,7 +571,7 @@ export function createRegistry(db: EvolveFlowDatabase, dataDir?: string): Capabi
     inputSchema: { type: 'object', properties: { date: { type: 'string' } } },
     mutating: false,
     handler: async (input) => {
-      const date = (input.date as string) ?? new Date().toISOString().split('T')[0];
+      const date = (input.date as string) ?? localDateString();
       const metrics = scheduleService.analyzeScheduleQuality(date);
       return { success: true, data: metrics };
     },
@@ -444,7 +589,10 @@ export function createRegistry(db: EvolveFlowDatabase, dataDir?: string): Capabi
     mutating: true,
     handler: wrapMutating('reminder.snooze', async (input) => {
       try {
-        const reminder = reminderService.snooze(input.reminder_id as string, input.duration_minutes as number);
+        const reminder = reminderService.snooze(
+          input.reminder_id as string,
+          input.duration_minutes as number
+        );
         return { success: true, data: reminder };
       } catch (e) {
         return { success: false, error: (e as Error).message };
@@ -459,7 +607,7 @@ export function createRegistry(db: EvolveFlowDatabase, dataDir?: string): Capabi
     inputSchema: { type: 'object', properties: { date: { type: 'string' } } },
     mutating: true,
     handler: wrapMutating('summary.generate_daily', async (input) => {
-      const date = (input.date as string) ?? new Date().toISOString().split('T')[0];
+      const date = (input.date as string) ?? localDateString();
       const summary = summaryService.generateDaily(date);
       return { success: true, data: summary };
     }),
@@ -471,7 +619,12 @@ export function createRegistry(db: EvolveFlowDatabase, dataDir?: string): Capabi
     description: '列出动作记录',
     inputSchema: {
       type: 'object',
-      properties: { limit: { type: 'number' }, offset: { type: 'number' }, actor: { type: 'string' }, origin: { type: 'string' } },
+      properties: {
+        limit: { type: 'number' },
+        offset: { type: 'number' },
+        actor: { type: 'string' },
+        origin: { type: 'string' },
+      },
     },
     mutating: false,
     handler: async (input) => {
@@ -489,7 +642,11 @@ export function createRegistry(db: EvolveFlowDatabase, dataDir?: string): Capabi
     name: 'undo.revert_action',
     domain: 'undo',
     description: '撤回动作',
-    inputSchema: { type: 'object', required: ['action_log_id'], properties: { action_log_id: { type: 'string' } } },
+    inputSchema: {
+      type: 'object',
+      required: ['action_log_id'],
+      properties: { action_log_id: { type: 'string' } },
+    },
     mutating: true,
     handler: wrapMutating('undo.revert_action', async (input) => {
       try {
@@ -544,7 +701,9 @@ export function createRegistry(db: EvolveFlowDatabase, dataDir?: string): Capabi
       if (typeof input.status === 'string' && TASK_STATUSES.has(input.status)) {
         filters.status = input.status as TaskStatus;
       }
-      if (input.project) {filters.project = input.project as string;}
+      if (input.project) {
+        filters.project = input.project as string;
+      }
       const tasks = taskService.list(filters);
       return { success: true, data: tasks };
     },
@@ -561,7 +720,9 @@ export function createRegistry(db: EvolveFlowDatabase, dataDir?: string): Capabi
     mutating: false,
     handler: async (input) => {
       const events = eventService.list(
-        input.start && input.end ? { start: input.start as string, end: input.end as string } : undefined,
+        input.start && input.end
+          ? { start: input.start as string, end: input.end as string }
+          : undefined
       );
       return { success: true, data: events };
     },
@@ -574,17 +735,222 @@ export function createRegistry(db: EvolveFlowDatabase, dataDir?: string): Capabi
     inputSchema: {
       type: 'object',
       required: ['start_time', 'end_time'],
-      properties: { start_time: { type: 'string' }, end_time: { type: 'string' }, exclude_event_id: { type: 'string' } },
+      properties: {
+        start_time: { type: 'string' },
+        end_time: { type: 'string' },
+        exclude_event_id: { type: 'string' },
+      },
     },
     mutating: false,
     handler: async (input) => {
       const events = eventService.findConflicts(
         input.start_time as string,
         input.end_time as string,
-        input.exclude_event_id as string | undefined,
+        input.exclude_event_id as string | undefined
       );
       return { success: true, data: events };
     },
+  });
+
+  registry.register({
+    name: 'file.list',
+    domain: 'file',
+    description: '列出工作区内目录文件',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string' },
+        limit: { type: 'number' },
+      },
+    },
+    mutating: false,
+    handler: async (input) => {
+      try {
+        const dirPath = resolveWorkspacePath((input.path as string | undefined) || '.');
+        const limit = Math.min(Math.max(Number(input.limit || 50), 1), 200);
+        const entries = fs
+          .readdirSync(dirPath, { withFileTypes: true })
+          .slice(0, limit)
+          .map((entry) => ({
+            name: entry.name,
+            path: path.relative(workspaceRoot, path.join(dirPath, entry.name)),
+            type: entry.isDirectory() ? 'directory' : 'file',
+          }));
+        return { success: true, data: entries };
+      } catch (e) {
+        return { success: false, error: (e as Error).message };
+      }
+    },
+  });
+
+  registry.register({
+    name: 'file.read',
+    domain: 'file',
+    description: '读取工作区内文本文件',
+    inputSchema: {
+      type: 'object',
+      required: ['path'],
+      properties: {
+        path: { type: 'string' },
+        max_bytes: { type: 'number' },
+      },
+    },
+    mutating: false,
+    handler: async (input) => {
+      try {
+        const filePath = resolveWorkspacePath(input.path);
+        const maxBytes = Math.min(Math.max(Number(input.max_bytes || 20000), 1), 200000);
+        const buffer = fs.readFileSync(filePath);
+        return {
+          success: true,
+          data: {
+            path: path.relative(workspaceRoot, filePath),
+            truncated: buffer.length > maxBytes,
+            content: buffer.subarray(0, maxBytes).toString('utf8'),
+          },
+        };
+      } catch (e) {
+        return { success: false, error: (e as Error).message };
+      }
+    },
+  });
+
+  registry.register({
+    name: 'file.search',
+    domain: 'file',
+    description: '在工作区内搜索文本',
+    inputSchema: {
+      type: 'object',
+      required: ['query'],
+      properties: {
+        query: { type: 'string' },
+        path: { type: 'string' },
+        limit: { type: 'number' },
+      },
+    },
+    mutating: false,
+    handler: async (input) => {
+      try {
+        const query = String(input.query || '');
+        if (!query) {
+          return { success: false, error: 'query is required' };
+        }
+        const root = resolveWorkspacePath((input.path as string | undefined) || '.');
+        const limit = Math.min(Math.max(Number(input.limit || 50), 1), 200);
+        const results: Array<{ path: string; line: number; text: string }> = [];
+
+        const walk = (dir: string) => {
+          if (results.length >= limit) {
+            return;
+          }
+          for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+            if (results.length >= limit) {
+              return;
+            }
+            if (entry.name === 'node_modules' || entry.name === 'dist' || entry.name === '.git') {
+              continue;
+            }
+            const entryPath = path.join(dir, entry.name);
+            if (entry.isDirectory()) {
+              walk(entryPath);
+              continue;
+            }
+            if (!entry.isFile()) {
+              continue;
+            }
+            let text = '';
+            try {
+              const stat = fs.statSync(entryPath);
+              if (stat.size > 500_000) {
+                continue;
+              }
+              text = fs.readFileSync(entryPath, 'utf8');
+            } catch {
+              continue;
+            }
+            const lines = text.split(/\r?\n/);
+            for (let i = 0; i < lines.length && results.length < limit; i++) {
+              if (lines[i].includes(query)) {
+                results.push({
+                  path: path.relative(workspaceRoot, entryPath),
+                  line: i + 1,
+                  text: lines[i].slice(0, 240),
+                });
+              }
+            }
+          }
+        };
+
+        walk(root);
+        return { success: true, data: results };
+      } catch (e) {
+        return { success: false, error: (e as Error).message };
+      }
+    },
+  });
+
+  registry.register({
+    name: 'file.write',
+    domain: 'file',
+    description: '写入工作区内文本文件',
+    inputSchema: {
+      type: 'object',
+      required: ['path', 'content'],
+      properties: {
+        path: { type: 'string' },
+        content: { type: 'string' },
+        overwrite: { type: 'boolean' },
+      },
+    },
+    mutating: true,
+    handler: wrapMutating('file.write', async (input) => {
+      try {
+        const filePath = resolveWorkspacePath(input.path);
+        const overwrite = input.overwrite !== false;
+        if (!overwrite && fs.existsSync(filePath)) {
+          return { success: false, error: 'File already exists' };
+        }
+        fs.mkdirSync(path.dirname(filePath), { recursive: true });
+        fs.writeFileSync(filePath, String(input.content ?? ''), 'utf8');
+        return { success: true, data: { path: path.relative(workspaceRoot, filePath) } };
+      } catch (e) {
+        return { success: false, error: (e as Error).message };
+      }
+    }),
+  });
+
+  registry.register({
+    name: 'terminal.run',
+    domain: 'terminal',
+    description: '在工作区内运行终端命令',
+    inputSchema: {
+      type: 'object',
+      required: ['command'],
+      properties: {
+        command: { type: 'string' },
+        timeout_ms: { type: 'number' },
+      },
+    },
+    mutating: true,
+    handler: wrapMutating('terminal.run', async (input) => {
+      const command = String(input.command || '');
+      if (!command) {
+        return { success: false, error: 'command is required' };
+      }
+      const timeout = Math.min(Math.max(Number(input.timeout_ms || 10000), 1000), 60000);
+      return new Promise<CapabilityResult>((resolve) => {
+        exec(command, { cwd: workspaceRoot, timeout }, (error, stdout, stderr) => {
+          resolve({
+            success: !error,
+            error: error ? error.message : undefined,
+            data: {
+              stdout: stdout.slice(0, 20000),
+              stderr: stderr.slice(0, 20000),
+            },
+          });
+        });
+      });
+    }),
   });
 
   registry.register({
@@ -637,7 +1003,7 @@ export function createRegistry(db: EvolveFlowDatabase, dataDir?: string): Capabi
           `SELECT id, category, insight_text, confidence, supporting_data, created_at
            FROM dream_insights
            ORDER BY created_at DESC
-           LIMIT ?`,
+           LIMIT ?`
         )
         .all(limit);
       return { success: true, data: rows };
@@ -665,14 +1031,20 @@ export function createRegistry(db: EvolveFlowDatabase, dataDir?: string): Capabi
     description: '检查 AI 连接状态',
     inputSchema: { type: 'object', properties: {} },
     mutating: false,
-    handler: async () => ({ success: true, data: { connected: false, reason: 'Handled by runtime' } }),
+    handler: async () => ({
+      success: true,
+      data: { connected: false, reason: 'Handled by runtime' },
+    }),
   });
 
   registry.register({
     name: 'ai.stream',
     domain: 'ai',
     description: '流式 AI 对话（实际由 sidecar 处理）',
-    inputSchema: { type: 'object', properties: { message: { type: 'string' }, session_id: { type: 'string' } } },
+    inputSchema: {
+      type: 'object',
+      properties: { message: { type: 'string' }, session_id: { type: 'string' } },
+    },
     mutating: false,
     handler: async () => ({ success: true, data: { streaming: true } }),
   });
@@ -681,7 +1053,10 @@ export function createRegistry(db: EvolveFlowDatabase, dataDir?: string): Capabi
     name: 'ai.chat',
     domain: 'ai',
     description: 'AI 对话（非流式）',
-    inputSchema: { type: 'object', properties: { message: { type: 'string' }, session_id: { type: 'string' } } },
+    inputSchema: {
+      type: 'object',
+      properties: { message: { type: 'string' }, session_id: { type: 'string' } },
+    },
     mutating: false,
     handler: async () => ({ success: true, data: { text: 'Handled by AI engine' } }),
   });
@@ -739,7 +1114,10 @@ export function createRegistry(db: EvolveFlowDatabase, dataDir?: string): Capabi
     description: '获取 Buddy 问候语和当前状态',
     inputSchema: { type: 'object', properties: {} },
     mutating: false,
-    handler: async () => ({ success: true, data: { greeting: '你好！', mood: 'neutral', level: 'full' } }),
+    handler: async () => ({
+      success: true,
+      data: { greeting: '你好！', mood: 'neutral', level: 'full' },
+    }),
   });
 
   registry.register({
@@ -762,7 +1140,9 @@ export function createRegistry(db: EvolveFlowDatabase, dataDir?: string): Capabi
     inputSchema: { type: 'object', properties: {} },
     mutating: false,
     handler: async () => {
-      const rows = database.prepare('SELECT * FROM reminders ORDER BY created_at DESC').all() as Record<string, unknown>[];
+      const rows = database
+        .prepare('SELECT * FROM reminders ORDER BY created_at DESC')
+        .all() as Record<string, unknown>[];
       const reminders = rows.map((r) => ({
         id: r.id as string,
         task_id: r.task_id as string | null,
@@ -795,7 +1175,10 @@ export function createRegistry(db: EvolveFlowDatabase, dataDir?: string): Capabi
           const fullPath = path.join(backupOutputDir, e.name);
           const dbPath = path.join(fullPath, 'evolveflow.db');
           const sizeBytes = fs.existsSync(dbPath) ? fs.statSync(dbPath).size : 0;
-          const date = e.name.replace('evolveflow-backup-', '').replace(/-/g, ':').replace(/T/g, ' ');
+          const date = e.name
+            .replace('evolveflow-backup-', '')
+            .replace(/-/g, ':')
+            .replace(/T/g, ' ');
           return {
             path: fullPath,
             name: e.name,
@@ -806,7 +1189,10 @@ export function createRegistry(db: EvolveFlowDatabase, dataDir?: string): Capabi
       backupDirs.sort((a, b) => b.date.localeCompare(a.date));
       const totalCount = backupDirs.length;
       const totalSizeBytes = backupDirs.reduce((sum, b) => sum + b.size_bytes, 0);
-      return { success: true, data: { backups: backupDirs, total_count: totalCount, total_size_bytes: totalSizeBytes } };
+      return {
+        success: true,
+        data: { backups: backupDirs, total_count: totalCount, total_size_bytes: totalSizeBytes },
+      };
     },
   });
 
@@ -842,7 +1228,10 @@ export function createRegistry(db: EvolveFlowDatabase, dataDir?: string): Capabi
       }
       try {
         const valid = backupService.verifyBackup(input.path as string);
-        return { success: true, data: { valid, error: valid ? undefined : 'Backup verification failed' } };
+        return {
+          success: true,
+          data: { valid, error: valid ? undefined : 'Backup verification failed' },
+        };
       } catch (e) {
         return { success: true, data: { valid: false, error: (e as Error).message } };
       }

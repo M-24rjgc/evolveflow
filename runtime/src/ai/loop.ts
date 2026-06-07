@@ -2,7 +2,7 @@
  * Core AI conversation loop.
  *
  * Manages:
- *  - Multi-turn conversation with Claude API
+ *  - Multi-turn conversation with DeepSeek-V4-Flash
  *  - Automatic tool-call → execute → result → continue cycles
  *  - Streaming response emission via callbacks
  *  - Context window auto-compaction
@@ -32,6 +32,7 @@ import type { AnthropicTool } from './types.js';
 import { toolToCapabilityName } from './tools.js';
 import type { ApiClient } from './client.js';
 import type { CapabilityRegistry } from '@evolveflow/capabilities';
+import type { Origin } from '@evolveflow/domain';
 
 // ── Configuration ──────────────────────────────────────────────
 
@@ -39,14 +40,37 @@ interface ConversationConfig {
   maxTurns?: number;
   tokenBudget?: number;
   compactAtTokens?: number;
+  thinking?: { type: 'enabled'; budget_tokens?: number } | { type: 'disabled' };
+  maxTokens?: number;
+  temperature?: number;
   systemPrompt: SystemMessageParam[];
   tools: AnthropicTool[];
   context: ConversationContext;
   client: ApiClient;
   registry: CapabilityRegistry;
   sessionId: string;
+  toolOrigin?: Origin;
+  confirmToolUse?: (
+    request: ToolPermissionRequest
+  ) => Promise<ToolPermissionDecision | boolean> | ToolPermissionDecision | boolean;
   onChunk: (chunk: AiStreamChunk) => void;
   abortSignal?: AbortSignal;
+}
+
+export interface ToolPermissionRequest {
+  sessionId: string;
+  approvalId: string;
+  toolUseId: string;
+  toolName: string;
+  capabilityName: string;
+  input: Record<string, unknown>;
+  mutating: boolean;
+}
+
+export interface ToolPermissionDecision {
+  allow: boolean;
+  reason?: string;
+  requiresApproval?: boolean;
 }
 
 const DEFAULT_MAX_TURNS = 15;
@@ -78,8 +102,9 @@ function cleanupSessions(): void {
     }
   }
   if (sessions.size > MAX_SESSIONS) {
-    const sorted = Array.from(sessions.entries())
-      .sort(([, a], [, b]) => a.lastActivityAt - b.lastActivityAt);
+    const sorted = Array.from(sessions.entries()).sort(
+      ([, a], [, b]) => a.lastActivityAt - b.lastActivityAt
+    );
     const toDelete = sorted.slice(0, sorted.length - MAX_SESSIONS);
     for (const [id] of toDelete) {
       sessions.delete(id);
@@ -87,10 +112,7 @@ function cleanupSessions(): void {
   }
 }
 
-export function createSession(
-  sessionId: string,
-  model: string,
-): AiSessionState {
+export function createSession(sessionId: string, model: string): AiSessionState {
   // Run cleanup before creating any new session
   cleanupSessions();
 
@@ -118,18 +140,23 @@ export function getAllSessions(): AiSessionState[] {
 
 export async function* runConversation(
   userMessage: string,
-  config: ConversationConfig,
+  config: ConversationConfig
 ): AsyncGenerator<AiStreamChunk> {
   const {
     maxTurns = DEFAULT_MAX_TURNS,
     tokenBudget = DEFAULT_TOKEN_BUDGET,
     compactAtTokens = DEFAULT_COMPACT_AT,
+    thinking,
+    maxTokens,
+    temperature,
     systemPrompt,
     tools,
     context,
     client,
     registry,
     sessionId,
+    toolOrigin = 'ai_page',
+    confirmToolUse,
     onChunk,
     abortSignal,
   } = config;
@@ -184,30 +211,44 @@ export async function* runConversation(
     }
 
     try {
-
-      // Stream response from Claude
+      // Stream response from DeepSeek.
       const stream = client.streamMessage(
         session.messages,
         tools,
         fullSystemPrompt,
-        { thinking: client.getThinkingConfig(2000) },
-        abortSignal,
+        {
+          ...(thinking ? { thinking } : { thinking: client.getThinkingConfig(2000) }),
+          ...(maxTokens ? { maxTokens } : {}),
+          ...(temperature !== undefined ? { temperature } : {}),
+        },
+        abortSignal
       );
 
       // Accumulators for this turn
       let currentTextBlock = '';
-      let currentThinkingBlock = '';
-      let currentToolBlocks: Map<number, {
-        id: string;
-        name: string;
-        inputJson: string;
-      }> = new Map();
+      const currentThinkingBlocks = new Map<
+        number,
+        {
+          thinking: string;
+          signature: string;
+        }
+      >();
+      const currentToolBlocks: Map<
+        number,
+        {
+          id: string;
+          name: string;
+          inputJson: string;
+        }
+      > = new Map();
 
       let stopReason: string | null = null;
       let usage: UsageInfo | null = null;
 
       for await (const event of stream) {
-        if (abortSignal?.aborted) break;
+        if (abortSignal?.aborted) {
+          break;
+        }
 
         switch (event.type) {
           case 'message_start': {
@@ -237,7 +278,10 @@ export async function* runConversation(
               yield toolChunk;
               onChunk(toolChunk);
             } else if (block.type === 'thinking') {
-              currentThinkingBlock = block.thinking || '';
+              currentThinkingBlocks.set(event.index, {
+                thinking: block.thinking || '',
+                signature: block.signature || '',
+              });
             }
             break;
           }
@@ -259,7 +303,12 @@ export async function* runConversation(
                 existing.inputJson += delta.partial_json;
               }
             } else if (delta.type === 'thinking_delta') {
-              currentThinkingBlock += delta.thinking;
+              const existing = currentThinkingBlocks.get(event.index) || {
+                thinking: '',
+                signature: '',
+              };
+              existing.thinking += delta.thinking;
+              currentThinkingBlocks.set(event.index, existing);
               const thinkChunk: AiStreamChunk = {
                 type: 'thinking_delta',
                 session_id: sessionId,
@@ -267,6 +316,13 @@ export async function* runConversation(
               };
               yield thinkChunk;
               onChunk(thinkChunk);
+            } else if (delta.type === 'signature_delta') {
+              const existing = currentThinkingBlocks.get(event.index) || {
+                thinking: '',
+                signature: '',
+              };
+              existing.signature = delta.signature;
+              currentThinkingBlocks.set(event.index, existing);
             }
             break;
           }
@@ -289,10 +345,14 @@ export async function* runConversation(
           case 'message_stop': {
             // Validate: stop_reason and usage should have been captured from message_delta
             if (!stopReason) {
-              console.warn(`[loop] message_stop received but stop_reason was not set (session: ${sessionId})`);
+              console.warn(
+                `[loop] message_stop received but stop_reason was not set (session: ${sessionId})`
+              );
             }
             if (!usage) {
-              console.warn(`[loop] message_stop received but usage data was not captured (session: ${sessionId})`);
+              console.warn(
+                `[loop] message_stop received but usage data was not captured (session: ${sessionId})`
+              );
             }
             break;
           }
@@ -319,6 +379,18 @@ export async function* runConversation(
       // Collect assistant response content blocks
       const assistantContent: ContentBlock[] = [];
 
+      for (const [, thinkingBlock] of Array.from(currentThinkingBlocks.entries()).sort(
+        ([a], [b]) => a - b
+      )) {
+        if (thinkingBlock.thinking) {
+          assistantContent.push({
+            type: 'thinking',
+            thinking: thinkingBlock.thinking,
+            signature: thinkingBlock.signature,
+          });
+        }
+      }
+
       if (currentTextBlock) {
         assistantContent.push({ type: 'text', text: currentTextBlock });
       }
@@ -344,11 +416,65 @@ export async function* runConversation(
         // Execute the tool via CapabilityRegistry
         const capabilityName = toolToCapabilityName(toolBlock.name);
         // e.g. "task_create" → "task.create"
+        const capability = registry.list().find((cap) => cap.name === capabilityName);
+        const mutating = !!capability?.mutating;
+
+        if (confirmToolUse) {
+          const approvalId = `${sessionId}:${toolBlock.id}`;
+          const permissionRequest = {
+            sessionId,
+            approvalId,
+            toolUseId: toolBlock.id,
+            toolName: toolBlock.name,
+            capabilityName,
+            input: parsedInput,
+            mutating,
+          };
+          const rawDecision = confirmToolUse(permissionRequest);
+          const shouldEmitApproval = shouldEmitToolApproval(rawDecision, mutating);
+          if (shouldEmitApproval) {
+            const permissionChunk: AiStreamChunk = {
+              type: 'tool_permission_request',
+              session_id: sessionId,
+              approval_id: approvalId,
+              tool_use_id: toolBlock.id,
+              tool_name: toolBlock.name,
+              capability_name: capabilityName,
+              tool_input: parsedInput,
+              mutating,
+            };
+            yield permissionChunk;
+            onChunk(permissionChunk);
+          }
+          const decision = await resolveToolPermission(rawDecision);
+
+          if (!decision.allow) {
+            const denyReason = decision.reason || `Tool execution denied: ${capabilityName}`;
+            toolResults.push({
+              type: 'tool_result',
+              tool_use_id: toolBlock.id,
+              content: denyReason,
+              is_error: true,
+            });
+
+            const deniedChunk: AiStreamChunk = {
+              type: 'tool_result',
+              session_id: sessionId,
+              tool_use_id: toolBlock.id,
+              tool_name: toolBlock.name,
+              tool_input: parsedInput,
+              error: denyReason,
+            };
+            yield deniedChunk;
+            onChunk(deniedChunk);
+            continue;
+          }
+        }
 
         try {
           const result = await registry.invoke(capabilityName, parsedInput, {
             actor: 'ai',
-            origin: 'ai_page',
+            origin: toolOrigin,
             session_id: sessionId,
           });
 
@@ -478,7 +604,7 @@ export async function* runConversation(
 
 function buildSystemPrompt(
   basePrompt: SystemMessageParam[],
-  context: ConversationContext,
+  context: ConversationContext
 ): SystemMessageParam[] {
   const contextBlock = buildContextBlock(context);
   return [...basePrompt, ...contextBlock];
@@ -506,7 +632,9 @@ function buildContextBlock(context: ConversationContext): SystemMessageParam[] {
     lines.push('\n📋 今日任务:');
     for (const t of context.todayTasks) {
       const status = t.status === 'completed' ? '✅' : t.status === 'in_progress' ? '🔄' : '⏳';
-      lines.push(`  ${status} ${t.title}${t.estimatedMinutes ? ` (${t.estimatedMinutes}分钟)` : ''}${t.priority ? ` [优先级${t.priority}]` : ''}${t.project ? ` [${t.project}]` : ''}`);
+      lines.push(
+        `  ${status} ${t.title}${t.estimatedMinutes ? ` (${t.estimatedMinutes}分钟)` : ''}${t.priority ? ` [优先级${t.priority}]` : ''}${t.project ? ` [${t.project}]` : ''}`
+      );
     }
   }
 
@@ -520,7 +648,9 @@ function buildContextBlock(context: ConversationContext): SystemMessageParam[] {
   if (context.todayBlocks.length > 0) {
     lines.push('\n🗓️ 今日排程:');
     for (const b of context.todayBlocks) {
-      lines.push(`  - ${b.startTime.slice(11, 16)}-${b.endTime.slice(11, 16)}: ${b.title}${b.isLocked ? ' 🔒' : ''}`);
+      lines.push(
+        `  - ${b.startTime.slice(11, 16)}-${b.endTime.slice(11, 16)}: ${b.title}${b.isLocked ? ' 🔒' : ''}`
+      );
     }
   }
 
@@ -536,7 +666,9 @@ function buildContextBlock(context: ConversationContext): SystemMessageParam[] {
   }
 
   lines.push('</evolveflow_context>');
-  lines.push('\n请基于以上上下文帮助用户管理日程。如果用户询问需要当前数据的问题，请使用工具查询。主动为用户提供日程优化建议。');
+  lines.push(
+    '\n请基于以上上下文帮助用户管理日程。如果用户询问需要当前数据的问题，请使用工具查询。主动为用户提供日程优化建议。'
+  );
 
   blocks.push({
     type: 'text',
@@ -554,13 +686,13 @@ function buildContextBlock(context: ConversationContext): SystemMessageParam[] {
  * Heuristic: ASCII chars average ~4 chars/token, CJK chars average ~2 chars/token.
  *
  * CJK ranges covered:
- *   一-鿿  CJK Unified Ideographs
- *   㐀-䶿  CJK Unified Ideographs Extension A
- *   豈-﫿  CJK Compatibility Ideographs
- *   ⺀-⻿  CJK Radicals Supplement
- *   　-〿  CJK Symbols and Punctuation
- *   ＀-￯  Fullwidth Forms
- *   ⾀0-⾡F CJK Supplement
+ *   U+4E00-U+9FFF CJK Unified Ideographs
+ *   U+3400-U+4DBF CJK Unified Ideographs Extension A
+ *   U+F900-U+FAFF CJK Compatibility Ideographs
+ *   U+2E80-U+2EFF CJK Radicals Supplement
+ *   U+3000-U+303F CJK Symbols and Punctuation
+ *   U+FF00-U+FFEF Fullwidth Forms
+ *   U+20000-U+2A6DF CJK Supplement
  */
 function estimateTokens(messages: MessageParam[], systemPrompt: SystemMessageParam[]): number {
   let total = 0;
@@ -568,9 +700,7 @@ function estimateTokens(messages: MessageParam[], systemPrompt: SystemMessagePar
     total += weightedCharCount(block.text || '') / ESTIMATED_CHARS_PER_TOKEN;
   }
   for (const msg of messages) {
-    const content = typeof msg.content === 'string'
-      ? msg.content
-      : JSON.stringify(msg.content);
+    const content = typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content);
     total += weightedCharCount(content) / ESTIMATED_CHARS_PER_TOKEN;
   }
   return Math.ceil(total);
@@ -586,15 +716,17 @@ function weightedCharCount(text: string): number {
   let count = 0;
   for (let i = 0; i < text.length; i++) {
     const code = text.codePointAt(i)!;
-    if (code > 0xFFFF) i++;  // skip trailing surrogate
+    if (code > 0xffff) {
+      i++;
+    } // skip trailing surrogate
     if (
-      (code >= 0x4E00 && code <= 0x9FFF) ||   // CJK Unified
-      (code >= 0x3400 && code <= 0x4DBF) ||   // CJK Extension A
-      (code >= 0xF900 && code <= 0xFAFF) ||   // CJK Compatibility
-      (code >= 0x2E80 && code <= 0x2EFF) ||   // CJK Radicals
-      (code >= 0x3000 && code <= 0x303F) ||   // CJK Symbols
-      (code >= 0xFF00 && code <= 0xFFEF) ||   // Halfwidth/Fullwidth
-      (code >= 0x2F800 && code <= 0x2FA1F)   // CJK Compatibility Supplement
+      (code >= 0x4e00 && code <= 0x9fff) || // CJK Unified
+      (code >= 0x3400 && code <= 0x4dbf) || // CJK Extension A
+      (code >= 0xf900 && code <= 0xfaff) || // CJK Compatibility
+      (code >= 0x2e80 && code <= 0x2eff) || // CJK Radicals
+      (code >= 0x3000 && code <= 0x303f) || // CJK Symbols
+      (code >= 0xff00 && code <= 0xffef) || // Halfwidth/Fullwidth
+      (code >= 0x2f800 && code <= 0x2fa1f) // CJK Compatibility Supplement
     ) {
       count += 2; // CJK ~2 chars per token
     } else {
@@ -609,10 +741,12 @@ function weightedCharCount(text: string): number {
 function compactConversation(session: AiSessionState): void {
   // Keep system-level context by preserving the first few messages
   // and the most recent messages. Compress the middle.
-  if (session.messages.length <= 6) return;
+  if (session.messages.length <= 6) {
+    return;
+  }
 
   const KEEP_FIRST = 2; // Keep first user-assistant pair
-  const KEEP_LAST = 4;  // Keep last few turns
+  const KEEP_LAST = 4; // Keep last few turns
 
   const firstMessages = session.messages.slice(0, KEEP_FIRST);
   const middleMessages = session.messages.slice(KEEP_FIRST, -KEEP_LAST);
@@ -634,6 +768,29 @@ function compactConversation(session: AiSessionState): void {
   }
 }
 
+function shouldEmitToolApproval(
+  decision: Promise<ToolPermissionDecision | boolean> | ToolPermissionDecision | boolean,
+  mutating: boolean
+): boolean {
+  if (decision instanceof Promise) {
+    return mutating;
+  }
+  if (typeof decision === 'object' && 'requiresApproval' in decision) {
+    return !!decision.requiresApproval;
+  }
+  return false;
+}
+
+async function resolveToolPermission(
+  decision: Promise<ToolPermissionDecision | boolean> | ToolPermissionDecision | boolean
+): Promise<ToolPermissionDecision> {
+  const resolved = await decision;
+  if (typeof resolved === 'boolean') {
+    return { allow: resolved };
+  }
+  return resolved;
+}
+
 /**
  * Build a meaningful summary from compressed messages.
  * Scans for task IDs, decisions, and preference changes.
@@ -647,9 +804,7 @@ function buildCompactSummary(messages: MessageParam[], count: number): string {
   const taskIdRe = /(?:task|任务)[\s\-_:：#]*([a-zA-Z0-9\-_]+)/gi;
 
   for (const msg of messages) {
-    const content = typeof msg.content === 'string'
-      ? msg.content
-      : JSON.stringify(msg.content);
+    const content = typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content);
 
     // Extract task IDs
     let m: RegExpExecArray | null;
@@ -663,10 +818,16 @@ function buildCompactSummary(messages: MessageParam[], count: number): string {
     const sentences = content.split(/[。！？\n.!?\n]+/);
     for (const sentence of sentences) {
       const s = sentence.trim();
-      if (!s || s.length < 4) continue;
+      if (!s || s.length < 4) {
+        continue;
+      }
 
       // Decision keywords (Chinese and English)
-      if (/^(?:决定|确认|同意|已安排|已|create |update |delete |schedule|reschedule|cancel |confirm |approve |reject )/i.test(s)) {
+      if (
+        /^(?:决定|确认|同意|已安排|已|create |update |delete |schedule|reschedule|cancel |confirm |approve |reject )/i.test(
+          s
+        )
+      ) {
         if (s.length > 5 && s.length < 120 && !decisions.includes(s)) {
           decisions.push(s);
         }
@@ -685,7 +846,9 @@ function buildCompactSummary(messages: MessageParam[], count: number): string {
 
   if (taskIds.size > 0) {
     const ids = Array.from(taskIds);
-    parts.push(`涉及任务: ${ids.slice(0, 5).join(', ')}${ids.length > 5 ? `等${ids.length}个` : ''}`);
+    parts.push(
+      `涉及任务: ${ids.slice(0, 5).join(', ')}${ids.length > 5 ? `等${ids.length}个` : ''}`
+    );
   }
 
   if (decisions.length > 0) {
@@ -725,7 +888,9 @@ function ensureMessageAlternation(messages: MessageParam[]): void {
  */
 function aggressiveCompact(session: AiSessionState): void {
   // Guard: don't compact if there are too few messages — it would duplicate content.
-  if (session.messages.length <= 4) return;
+  if (session.messages.length <= 4) {
+    return;
+  }
 
   const KEEP_FIRST = 2;
   const KEEP_LAST = 2;
@@ -738,7 +903,10 @@ function aggressiveCompact(session: AiSessionState): void {
   const summary = buildCompactSummary(middleMessages, compressedCount);
 
   // Remove the outer brackets from summary so we can wrap it in an "紧急压缩" tag
-  const stripped = summary.replace(/^\[对话压缩:/, '').replace(/\]$/, '').trim();
+  const stripped = summary
+    .replace(/^\[对话压缩:/, '')
+    .replace(/\]$/, '')
+    .trim();
   const aggressiveSummary: MessageParam = {
     role: 'user',
     content: `[紧急压缩: ${compressedCount}条消息已合并。${stripped}]`,

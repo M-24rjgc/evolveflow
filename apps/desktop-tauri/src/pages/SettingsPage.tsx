@@ -19,6 +19,10 @@ import { ShortcutDisplay, DEFAULT_SHORTCUT_GROUPS } from '../lib/useKeyboardShor
 import { useI18n, type Locale } from '../lib/i18n';
 import { MetricCard, PageHeader, PageShell, Panel, SegmentedTabs } from '../components/PageChrome';
 
+const AI_PROVIDER = 'DeepSeek';
+const AI_MODEL = 'deepseek-v4-flash';
+const AI_MODEL_DISPLAY = 'DeepSeek-V4-Flash';
+
 export default function SettingsPage() {
   const toast = useToast();
   const { t, locale, setLocale } = useI18n();
@@ -33,7 +37,6 @@ export default function SettingsPage() {
   const [connectivityStatus, setConnectivityStatus] = useState<string | null>(null);
   const [aiStatus, setAiStatus] = useState<string | null>(null);
   const [buddyLevel, setBuddyLevel] = useState<'full' | 'minimal' | 'off'>('full');
-  const [provider, setProvider] = useState<'anthropic' | 'deepseek'>('deepseek');
   const [theme, setTheme] = useState<'light' | 'dark'>('light');
 
   // Toast-based notifications replace the old StatusMessage pattern
@@ -71,14 +74,13 @@ export default function SettingsPage() {
 
   async function loadPreferences() {
     try {
-      const [startResult, endResult, reminderResult, styleResult, keyStatusResult, buddyResult, providerResult] = await Promise.all([
+      const [startResult, endResult, reminderResult, styleResult, keyStatusResult, buddyResult] = await Promise.all([
         callCapability('preference.get', { key: 'work_hours_start' }) as Promise<{ success: boolean; data?: string }>,
         callCapability('preference.get', { key: 'work_hours_end' }) as Promise<{ success: boolean; data?: string }>,
         callCapability('preference.get', { key: 'reminder_minutes_before' }) as Promise<{ success: boolean; data?: string }>,
         callCapability('preference.get', { key: 'schedule_style' }) as Promise<{ success: boolean; data?: string }>,
         callCapability('api_key.status', {}) as Promise<{ success?: boolean; data?: { configured: boolean; prefix: string }; configured?: boolean; prefix?: string }>,
         callCapability('preference.get', { key: 'buddy_level' }) as Promise<{ success: boolean; data?: string }>,
-        callCapability('preference.get', { key: 'ai_provider' }) as Promise<{ success: boolean; data?: string }>,
       ]);
 
       if (startResult.success && startResult.data) {setWorkStart(startResult.data);}
@@ -94,9 +96,6 @@ export default function SettingsPage() {
       }
       if (buddyResult.success && buddyResult.data) {
         setBuddyLevel(buddyResult.data as 'full' | 'minimal' | 'off');
-      }
-      if (providerResult.success && providerResult.data) {
-        setProvider(providerResult.data as 'anthropic' | 'deepseek');
       }
     } catch {
       // Use defaults
@@ -131,7 +130,6 @@ export default function SettingsPage() {
 
     try {
       await callCapability('preference.set', { key: 'api_key', value: apiKeyInput.trim() });
-      await callCapability('preference.set', { key: 'ai_provider', value: provider });
       setApiKeyConfigured(true);
       setApiKeyPrefix(apiKeyInput.trim().slice(-4));
       setApiKeyInput('');
@@ -163,24 +161,6 @@ export default function SettingsPage() {
     }
   }
 
-  async function handleProviderChange(newProvider: 'anthropic' | 'deepseek') {
-    if (newProvider === provider) {return;}
-    setProvider(newProvider);
-    setApiKeyInput('');
-    setApiKeyConfigured(false);
-    setApiKeyPrefix('');
-    setShowApiKeyInput(true);
-    setAiStatus(null);
-    try {
-      await callCapability('preference.set', { key: 'ai_provider', value: newProvider });
-      await callCapability('preference.set', { key: 'api_key', value: '' });
-      const providerName = newProvider === 'anthropic' ? 'Anthropic (Claude)' : 'DeepSeek';
-      toast.info(t('settings.switchedProvider', { provider: providerName }));
-    } catch (e) {
-      toast.error(t('settings.providerSwitchFailed', { reason: e instanceof Error ? e.message : String(e) }));
-    }
-  }
-
   async function saveBuddyLevel(level: 'full' | 'minimal' | 'off') {
     setBuddyLevel(level);
     try {
@@ -208,7 +188,7 @@ export default function SettingsPage() {
   async function testAiConnectivity() {
     setAiStatus(t('settings.connectivity_checking'));
     try {
-      const result = await callCapability('ai.check_connectivity', {}) as {
+      const result = await callCapability('ai.check_connectivity', { force: true }) as {
         connected?: boolean;
         reason?: string;
       };
@@ -226,7 +206,7 @@ export default function SettingsPage() {
     <PageShell>
       <PageHeader
         title={t('settings.title')}
-        subtitle={`${provider === 'anthropic' ? 'Anthropic' : 'DeepSeek'} · ${locale}`}
+        subtitle={`${AI_MODEL_DISPLAY} · ${locale}`}
         icon={<SettingsIcon size={19} />}
         actions={
           <>
@@ -247,7 +227,7 @@ export default function SettingsPage() {
       <div className="metric-grid">
         <MetricCard label={t('settings.appearance')} value={theme === 'dark' ? t('settings.theme_dark') : t('settings.theme_light')} hint={t('settings.language')} />
         <MetricCard label={t('settings.work_hours')} value={`${workStart}-${workEnd}`} hint={t('settings.schedule_style')} />
-        <MetricCard label={t('settings.ai_config')} value={apiKeyConfigured ? t('ai.ready') : t('ai.no_key')} hint={provider === 'anthropic' ? 'Anthropic' : 'DeepSeek'} tone={apiKeyConfigured ? 'good' : 'warn'} />
+        <MetricCard label={t('settings.ai_config')} value={apiKeyConfigured ? t('ai.ready') : t('ai.no_key')} hint={AI_MODEL_DISPLAY} tone={apiKeyConfigured ? 'good' : 'warn'} />
         <MetricCard label={t('settings.reminder_preferences')} value={`${reminderPreference}m`} hint={t('settings.schedule_style')} />
         <MetricCard label={t('settings.buddy_settings')} value={t('settings.buddy_mode_' + buddyLevel)} hint={t('settings.buddy_desc')} />
       </div>
@@ -348,24 +328,20 @@ export default function SettingsPage() {
         <Panel title={t('settings.ai_config')} icon={<Bot size={17} />} className="wide" >
           <div className="field-grid">
             <label className="field-row">
-              {t('settings.ai_config')} - {t('common.name')}
-              <SegmentedTabs<'deepseek' | 'anthropic'>
-                value={provider}
-                onChange={(value) => { void handleProviderChange(value); }}
-                ariaLabel={t('settings.ai_config')}
-                items={[
-                  { value: 'deepseek', label: 'DeepSeek' },
-                  { value: 'anthropic', label: 'Anthropic (Claude)' },
-                ]}
-              />
+              {t('settings.ai_provider')}
+              <span className="status-badge good">{AI_PROVIDER}</span>
+            </label>
+            <label className="field-row">
+              {t('settings.ai_model')}
+              <span className="status-badge">{AI_MODEL}</span>
             </label>
             <div className="field-row">
-              <span>{t(provider === 'anthropic' ? 'settings.apiKeyLabelAnthropic' : 'settings.apiKeyLabelDeepseek')}</span>
+              <span>{t('settings.apiKeyLabelDeepseek')}</span>
               <span className="field-help">
-                {t(provider === 'anthropic' ? 'settings.apiKeyDescAnthropic' : 'settings.apiKeyDescDeepseek')}
+                {t('settings.apiKeyDescDeepseek')}
               </span>
-              <a className="field-help" href={provider === 'anthropic' ? 'https://console.anthropic.com/settings/keys' : 'https://platform.deepseek.com/api_keys'} target="_blank" rel="noreferrer">
-                {provider === 'anthropic' ? 'https://console.anthropic.com/settings/keys' : 'https://platform.deepseek.com/api_keys'}
+              <a className="field-help" href="https://platform.deepseek.com/api_keys" target="_blank" rel="noreferrer">
+                https://platform.deepseek.com/api_keys
               </a>
             </div>
           </div>
@@ -373,7 +349,7 @@ export default function SettingsPage() {
           {apiKeyConfigured && !showApiKeyInput ? (
             <div className="settings-actions" style={{ marginTop: 14 }}>
               <span className="status-badge good">
-                {t('settings.apiKeyConfiguredLabel', { provider: provider === 'anthropic' ? 'Anthropic' : 'DeepSeek', prefix: apiKeyPrefix })}
+                {t('settings.apiKeyConfiguredLabel', { provider: AI_PROVIDER, prefix: apiKeyPrefix })}
               </span>
               <button className="btn btn-secondary" onClick={handleChangeApiKey}>{t('settings.api_key_change')}</button>
               <button className="btn btn-secondary" onClick={handleClearApiKey} style={{ color: 'var(--danger-text)' }}>{t('settings.api_key_clear')}</button>
@@ -383,7 +359,7 @@ export default function SettingsPage() {
               <input
                 id="settings-api-key"
                 type="password"
-                placeholder={provider === 'anthropic' ? 'sk-ant-api03-...' : 'sk-...'}
+                placeholder="sk-..."
                 value={apiKeyInput}
                 onChange={(event) => { setApiKeyInput(event.target.value); }}
               />

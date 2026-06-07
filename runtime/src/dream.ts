@@ -2,7 +2,7 @@
  * EvolveFlow Dream System
  * ========================
  * THE core differentiator: real AI analysis of user behavior patterns.
- * Queries the actual database, analyzes with Claude Haiku, and produces
+ * Queries the actual database, analyzes with DeepSeek-V4-Flash, and produces
  * structured insights about productivity, energy, scheduling, and habits.
  *
  * No rule engines. No hardcoded returns. No stubs. Only real AI.
@@ -237,7 +237,7 @@ export class DreamOrchestrator {
     memoryDir: string,
     db: Database.Database,
     apiClient: ApiClient,
-    config?: Partial<DreamConfig>,
+    config?: Partial<DreamConfig>
   ) {
     this.config = { ...DEFAULT_CONFIG, ...config };
     this.memoryDir = memoryDir;
@@ -256,7 +256,9 @@ export class DreamOrchestrator {
 
   /** Check whether conditions are met for a dream run */
   shouldRun(userIdleMinutes: number): boolean {
-    if (this.isRunning) {return false;}
+    if (this.isRunning) {
+      return false;
+    }
 
     const sessionMet = this.sessionCount >= this.config.sessionThreshold;
     const timeMet =
@@ -269,7 +271,9 @@ export class DreamOrchestrator {
 
   /** Check whether it's the configured daily-end hour */
   shouldRunDailyEnd(): boolean {
-    if (this.isRunning) {return false;}
+    if (this.isRunning) {
+      return false;
+    }
     const now = new Date();
     return now.getHours() === this.config.dailyEndHour && now.getMinutes() < 5;
   }
@@ -373,7 +377,7 @@ export class DreamOrchestrator {
         `SELECT capability, actor, origin, description, created_at
          FROM action_logs
          ORDER BY created_at DESC
-         LIMIT 500`,
+         LIMIT 500`
       )
       .all() as Array<{
       capability: string;
@@ -389,7 +393,7 @@ export class DreamOrchestrator {
         `SELECT status, COUNT(*) as count
          FROM tasks
          GROUP BY status
-         ORDER BY count DESC`,
+         ORDER BY count DESC`
       )
       .all() as Array<{ status: string; count: number }>;
 
@@ -402,7 +406,7 @@ export class DreamOrchestrator {
          FROM action_logs
          WHERE capability = 'task.complete'
          GROUP BY day_of_week
-         ORDER BY day_of_week`,
+         ORDER BY day_of_week`
       )
       .all() as Array<{ day_of_week: number; count: number }>;
 
@@ -415,7 +419,7 @@ export class DreamOrchestrator {
          FROM action_logs
          WHERE capability = 'task.complete'
          GROUP BY hour_of_day
-         ORDER BY hour_of_day`,
+         ORDER BY hour_of_day`
       )
       .all() as Array<{ hour_of_day: number; count: number }>;
 
@@ -426,7 +430,7 @@ export class DreamOrchestrator {
          FROM schedule_blocks
          GROUP BY date
          ORDER BY date DESC
-         LIMIT 30`,
+         LIMIT 30`
       )
       .all() as Array<{ date: string; total_blocks: number; locked_blocks: number | null }>;
 
@@ -436,7 +440,7 @@ export class DreamOrchestrator {
         `SELECT date, completed_items, incomplete_items, deferred_items, raw_text
          FROM daily_summaries
          ORDER BY date DESC
-         LIMIT 30`,
+         LIMIT 30`
       )
       .all() as Array<{
       date: string;
@@ -457,7 +461,7 @@ export class DreamOrchestrator {
         `SELECT
            MIN(created_at) as first_date,
            MAX(created_at) as last_date
-         FROM action_logs`,
+         FROM action_logs`
       )
       .get() as { first_date: string | null; last_date: string | null } | undefined;
 
@@ -512,16 +516,14 @@ export class DreamOrchestrator {
   // ── AI Analysis ──────────────────────────────────────────────
 
   /**
-   * Send the structured data to Claude Haiku for real AI analysis.
+   * Send the structured data to DeepSeek-V4-Flash for real AI analysis.
    * The AI returns a structured JSON analysis with insights and recommendations.
    */
   private async analyzeWithAI(dreamData: DreamData): Promise<DreamAnalysisResult> {
     // Build the user message with structured data
     const dataStr = JSON.stringify(dreamData, null, 2);
 
-    const systemPrompt: SystemMessageParam[] = [
-      { type: 'text', text: DREAM_SYSTEM_PROMPT },
-    ];
+    const systemPrompt: SystemMessageParam[] = [{ type: 'text', text: DREAM_SYSTEM_PROMPT }];
 
     const messages: MessageParam[] = [
       {
@@ -534,17 +536,14 @@ ${dataStr}
       },
     ];
 
-    // Call Claude Haiku for cost-effective background analysis
+    // Call the fixed DeepSeek-V4-Flash model for background analysis.
     const result = await this.apiClient.createMessage(messages, undefined, systemPrompt, {
-      model: this.config.modelName,
       maxTokens: 4096,
       temperature: 0.3, // Low temperature for consistent structured output
     });
 
     // Extract text from response
-    const textBlock = result.response.content.find(
-      (block) => block.type === 'text',
-    );
+    const textBlock = result.response.content.find((block) => block.type === 'text');
     if (!textBlock || textBlock.type !== 'text') {
       return {
         status: 'error',
@@ -627,9 +626,7 @@ ${dataStr}
               category: this.validateCategory(i.category as string),
               description: typeof i.description === 'string' ? i.description : '',
               confidence:
-                typeof i.confidence === 'number'
-                  ? Math.max(0, Math.min(1, i.confidence))
-                  : 0,
+                typeof i.confidence === 'number' ? Math.max(0, Math.min(1, i.confidence)) : 0,
               supportingData: (i.supportingData as Record<string, unknown>) ?? {},
               suggestion: typeof i.suggestion === 'string' ? i.suggestion : '',
             }))
@@ -637,9 +634,7 @@ ${dataStr}
         : [],
       preferences: {},
       confidence:
-        typeof parsed.confidence === 'number'
-          ? Math.max(0, Math.min(1, parsed.confidence))
-          : 0,
+        typeof parsed.confidence === 'number' ? Math.max(0, Math.min(1, parsed.confidence)) : 0,
     };
 
     // Extract preferences if provided
@@ -671,7 +666,10 @@ ${dataStr}
       const adj = parsed.buddyAdjustments as Record<string, unknown>;
       result.buddyAdjustments = {};
       if (typeof adj.encouragementFrequency === 'number') {
-        result.buddyAdjustments.encouragementFrequency = Math.max(0, Math.min(1, adj.encouragementFrequency));
+        result.buddyAdjustments.encouragementFrequency = Math.max(
+          0,
+          Math.min(1, adj.encouragementFrequency)
+        );
       }
       if (typeof adj.severityTone === 'number') {
         result.buddyAdjustments.severityTone = Math.max(0, Math.min(1, adj.severityTone));
@@ -698,10 +696,12 @@ ${dataStr}
   }
 
   private validateCategory(
-    cat: string,
+    cat: string
   ): 'productivity' | 'energy' | 'scheduling' | 'habit' | 'adherence' | 'issue' {
     const valid = ['productivity', 'energy', 'scheduling', 'habit', 'adherence', 'issue'];
-    return valid.includes(cat) ? (cat as 'productivity' | 'energy' | 'scheduling' | 'habit' | 'adherence' | 'issue') : 'productivity';
+    return valid.includes(cat)
+      ? (cat as 'productivity' | 'energy' | 'scheduling' | 'habit' | 'adherence' | 'issue')
+      : 'productivity';
   }
 
   // ── Persistence ──────────────────────────────────────────────
@@ -714,7 +714,7 @@ ${dataStr}
   private saveDreamResult(
     analysis: DreamAnalysisResult,
     runId: string,
-    dreamData: DreamData | null,
+    dreamData: DreamData | null
   ): void {
     const normalizedDir = path.resolve(this.memoryDir);
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -763,7 +763,9 @@ ${dataStr}
         lines.push(`- **置信度**: ${(insight.confidence * 100).toFixed(0)}% ${confidenceBar}`);
         lines.push(`- **建议**: ${insight.suggestion}`);
         if (Object.keys(insight.supportingData).length > 0) {
-          lines.push(`- **支持数据**: \`\`\`json\n${JSON.stringify(insight.supportingData, null, 2)}\n\`\`\``);
+          lines.push(
+            `- **支持数据**: \`\`\`json\n${JSON.stringify(insight.supportingData, null, 2)}\n\`\`\``
+          );
         }
         lines.push('');
       }
@@ -820,16 +822,20 @@ ${dataStr}
           JSON.stringify(insight.supportingData),
           `Dream analysis ${runId}: ${analysis.summary.slice(0, 200)}`,
           expiresAt,
-          now.toISOString(),
+          now.toISOString()
         );
       }
     });
 
     try {
       insertMany();
-      console.log(`[Dream] Saved ${analysis.insights.length} insights to database for run ${runId}`);
+      console.log(
+        `[Dream] Saved ${analysis.insights.length} insights to database for run ${runId}`
+      );
     } catch (err) {
-      console.error(`[Dream] Failed to save insights to database: ${err instanceof Error ? err.message : String(err)}`);
+      console.error(
+        `[Dream] Failed to save insights to database: ${err instanceof Error ? err.message : String(err)}`
+      );
     }
   }
 
@@ -843,10 +849,14 @@ ${dataStr}
 
       const files = fs.readdirSync(this.memoryDir);
       for (const f of files) {
-        if (!f.startsWith('dream-') || !f.endsWith('.md')) {continue;}
+        if (!f.startsWith('dream-') || !f.endsWith('.md')) {
+          continue;
+        }
 
         const filePath = path.resolve(path.join(this.memoryDir, f));
-        if (!filePath.startsWith(normalizedDir)) {continue;}
+        if (!filePath.startsWith(normalizedDir)) {
+          continue;
+        }
 
         try {
           const stat = fs.statSync(filePath);
@@ -859,7 +869,9 @@ ${dataStr}
         }
       }
     } catch (err) {
-      console.error(`[Dream] Failed to clean old dream files: ${err instanceof Error ? err.message : String(err)}`);
+      console.error(
+        `[Dream] Failed to clean old dream files: ${err instanceof Error ? err.message : String(err)}`
+      );
     }
   }
 
