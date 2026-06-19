@@ -1,0 +1,18 @@
+{
+  "skills": {
+    "setup-matt-pocock-skills": {
+      "issueTracker": "local",
+      "triageLabels": {
+        "needs-triage": "needs-triage",
+        "needs-info": "needs-info",
+        "ready-for-agent": "ready-for-agent",
+        "ready-for-human": "ready-for-human",
+        "wontfix": "wontfix"
+      },
+      "domainLayout": "single-context",
+      "contextDocPath": "docs/CONTEXT.md",
+      "adrDirPath": "docs/adr",
+      "prsAsRequestSurface": false
+    }
+  }
+}
