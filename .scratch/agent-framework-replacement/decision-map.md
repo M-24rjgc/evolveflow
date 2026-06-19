@@ -351,14 +351,57 @@ Type: Prototype
 
 ### Answer
 
-（待 prototype session 解决）
+基于 #3 对 pi 源码的调研，三分之二的验证已从文档/代码确认，无需再开 prototype session：
+
+| 验证项                | 结论                              | 证据                                                                                       |
+| --------------------- | --------------------------------- | ------------------------------------------------------------------------------------------ |
+| (a) 注册新 Agent 模式 | ✅ **原生支持**                   | pi 扩展可 `register mode`（动态注册，extensions.md 明示）；核心无硬编码 mode，全靠扩展提供 |
+| (c) 挂一组 Skill/Tool | ✅ **原生支持**                   | `pi.registerTool` 是扩展一等公民；桥接扩展正是用这个把 CapabilityRegistry 暴露             |
+| (b) 注册新 UI 页面    | 🟡 **部分支持，需自建前端扩展层** | 见下方 #6                                                                                  |
+
+#### (b) 的真相：pi 的 UI 扩展 ≠ EvolveFlow 的"新页面"
+
+pi 有 `extension_ui_request/response` 子协议（扩展可向前端发交互请求），但这只是"扩展 ↔ 现有 UI 的消息通道"，**不等于"动态给 React Router 加一个新页面"**。
+
+EvolveFlow 愿景里的"插件带新页面"（如长程调研插件带一个调研工作台页面），需要 EvolveFlow **自建前端扩展机制**：插件 manifest 声明它要注册的页面 → 前端启动时读 manifest 动态加载组件挂到 Router → pi 的 extension_ui_request 作为"插件运行时 ↔ 其页面"的消息通道。
+
+这是 EvolveFlow 特有的前端工程，pi 帮不上，但也不阻塞——pi 侧的工具/模式扩展已验证 OK，前端扩展层独立做。
+
+#### 结论：pi 扩展机制足够支撑"插件=能力包"愿景，decision-map 收尾
+
+"前端动态页面扩展"是实现期的事，转入新 ticket #6 跟踪，不阻塞框架选型。
 
 ---
 
-## 雾区（暂不展开，待 frontier 推进后浮现）
+## #6: EvolveFlow 前端动态页面扩展机制
 
-- 自研 runtime 里哪些代码值得抢救性保留（除已列的"特色"外）
-- 旧测试如何迁移/重写
-- Dream 系统在新框架下怎么重新接入
-- 切换期的双跑/灰度策略（是否需要）
-- 版本/发布如何处理（fork 后的版本号、CHANGELOG）
+Blocked by: #4（fork 落地后）
+Type: Prototype
+
+### Question
+
+愿景里"插件带新页面"（如长程调研插件带一个 React 工作台页面），需要 EvolveFlow 自建前端扩展层：插件 manifest 声明页面 → 前端动态加载。pi 不提供这层。用原型验证可行性：插件包导出 React 组件 + manifest，前端运行时动态 import 并挂到 Router。
+
+### Answer
+
+（实现期 Prototype，fork 落地后再做。当前记为已知工作项，不阻塞决策。）
+
+---
+
+## 雾区（部分已随 #3/#4 消散）
+
+- ~~自研 runtime 里哪些代码值得抢救性保留~~ → 已答（#4：tools.ts 映射保留、调度器保留、loop/client 删）
+- ~~Dream 系统在新框架下怎么重新接入~~ → 已答（#3：改造成 pi 扩展，中期排期，步骤7）
+- ~~旧测试如何迁移/重写~~ → 已答（#4：ai.test.ts 大部分重写，context/tools 测试保留）
+- 切换期的双跑/灰度策略（是否需要）→ 单人项目，按 #4 的 8 步增量迁移即可，不做双跑
+- 版本/发布如何处理（fork 后的版本号、CHANGELOG）→ 待发版前再定，当前不阻塞
+
+---
+
+## Decision Map 状态：✅ 雾散，决策完成
+
+所有 frontier ticket（#1-#5）已解决，#6 转为实现期工作项。
+**路径到 finish line 已清晰**：按 #4 的 8 步迁移草案执行。
+
+下一步：进入 `/to-prd`，把 #4 的迁移步骤草案转成可执行 PRD，
+落到 `.scratch/agent-framework-replacement/PRD.md`，然后用 `/implement` 执行。
