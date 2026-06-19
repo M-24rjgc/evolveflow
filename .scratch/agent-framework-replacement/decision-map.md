@@ -97,6 +97,23 @@ deepagent）以及其他主流 TS Agent 框架，它们各自到底是什么？
 - **yuxi 到底是什么？** 用户能否补一条线索（中/英文、在哪看到、有无 MCP/RAG 特征）？
   若想不起来，直接排除，不影响 #2 推进。
 
+#### F. 补充核实：xerrors/Yuxi（用户给出确切链接）
+
+用户补了链接 `github.com/xerrors/Yuxi`，它是真实存在的项目。
+
+- **定位**：多租户智能体开发平台（Agent Harness），整合 RAG + Milvus 知识库 +
+  知识图谱 + LangGraph 多智能体编排。是**平台/应用**，非纯框架。
+- **技术栈**：前端 Vue3，**后端 Python（FastAPI + LangGraph v1）**，非 TS/Node。
+- **企业级痕迹（用户要砍的全中）**：多租户是渗透式设计（前端路由守卫 +
+  后端认证中间件 + 数据查询 tenant 维度散落各层），单租户化是跨多层重构。
+- **依赖栈重**：PG + Redis + MinIO + Milvus + Neo4j 五大服务，Docker Compose 优先。
+- **许可证**：⚠️ 未直接读到 LICENSE，需用户亲自核对（硬前提）。
+- **结论**：架构/功能确实好（monorepo + 两份架构文档 + 扩展点齐全），
+  但有三个硬卡点：(1) 许可证未核实 (2) 多租户渗透式难砍 (3) Python+重 Docker 栈
+  与"个人本地优先 TS 桌面应用"根本性冲突。
+- **影响 #2**：Yuxi 作为整体 fork 底座**不合适**（栈冲突 + 砍改成本过高），
+  但其**知识图谱/RAG/AgenticRAG 的设计思路值得借鉴**。
+
 ---
 
 ## #2: 哪个框架最匹配评判北极星（含砍改可行性）
@@ -113,7 +130,63 @@ Type: Discuss
 
 ### Answer
 
-（待 discuss session 解决）
+**决定：选用 `earendil-works/pi` 作为 Agent runtime 底座。**
+
+#### 决赛对比
+
+| 维度           | **pi（earendil-works）**    | Vercel AI SDK           | Yuxi(xerrors)      |
+| -------------- | --------------------------- | ----------------------- | ------------------ |
+| 许可证         | ✅ **MIT**                  | ✅ MIT                  | ⚠️ 未核实          |
+| 语言/栈        | ✅ **TS/Node**              | ✅ TS                   | ❌ Python+重Docker |
+| 本地优先       | ✅ 核心设计理念             | 🟡 中性(偏云SDK)        | ❌ 五大服务依赖    |
+| 形态           | ✅ **harness(骨架)**        | ❌ library(砖头)        | 平台               |
+| MCP            | 🟡 扩展提供                 | ✅ 原生                 | ✅ 有              |
+| 扩展/插件系统  | ✅ **一等公民,热重载**      | ❌ 无(要自建)           | 🟡 有但绑定平台    |
+| 动态注册新模式 | ✅ **扩展可注册mode**       | ❌ 无                   | 🟡                 |
+| 会话持久化     | ✅ **核心一等公民**         | ❌ 需自建               | ✅                 |
+| 记忆生态       | ✅ **4173+包,记忆/RAG齐备** | ❌ 无                   | ✅ 自带            |
+| 嵌入桌面       | ✅ **SDK+RPC双路径**        | ✅                      | ❌ Docker          |
+| 砍改难度       | 🟡 砍CLI层(轻)              | ✅ 不用砍               | ❌ 多租户渗透式    |
+| **综合**       | **🏆 胜出**                 | 备选(自建harness成本高) | 排除(栈冲突)       |
+
+#### 为什么是 pi（关键论据）
+
+1. **哲学同构**：pi 的"最小核心 + 扩展即能力"与 EvolveFlow 的"插件=能力包"
+   几乎是同一个理念的两种表述。pi 扩展能注册 tool/mode/command/prompt，
+   这正是 EvolveFlow 想要的"能力包"。
+2. **harness 非 library**：用户明确指出"Vercel 的话 harness 不好写"——正确。
+   pi 是骨架（有完整的 agent 运行循环、会话引擎、事件总线），拿来改；
+   Vercel AI SDK 是砖头（要自己砌 harness），违背 ADR-0006"不重写"。
+3. **MIT + TS + 本地优先**：三个硬指标全中。
+4. **拿来主义机会大**：pi-memctx（记忆/RAG）、context-mode（MCP+上下文压缩）、
+   pi-context-tools 等可直接预装；EvolveFlow 的日程/任务能力作为 pi 扩展开发，
+   还能反哺 pi 生态。
+5. **会话持久化是核心一等公民**：补上了 EvolveFlow 当前最大的缺口
+   （自研 runtime 的 ai_sessions 表建了从不写入）。
+
+#### pi 的已知短板及应对
+
+| 短板                                 | 应对                                          |
+| ------------------------------------ | --------------------------------------------- |
+| 核心不含 MCP（靠扩展）               | 预装 context-mode 等 MCP 扩展为"内置必备包"   |
+| 个人助理垂类包稀缺（日历/任务/笔记） | 恰是 EvolveFlow 的差异化——自建为 pi 扩展      |
+| Issue #5226 打包坑（asar 路径失效）  | 用 RPC 模式 sidecar 规避，pi 跑独立 Node 进程 |
+| 作者集中度（Mario Zechner 主导）     | MIT + 4173 包生态已对冲 bus factor            |
+
+#### Vercel AI SDK 的定位（备选/共存）
+
+不作为底座，但 pi 的 `packages/ai`（模型抽象层）若不够用，
+可借鉴 Vercel AI SDK 的 provider 抽象来补 DeepSeek 等模型适配。
+两者不互斥。
+
+#### 排除的候选及理由
+
+- **Yuxi(xerrors)**：Python 后端 + 重 Docker 栈 + 多租户渗透式，与"个人本地优先 TS 桌面"
+  根本性冲突。砍改成本远超重写。但其知识图谱/AgenticRAG 设计思路值得借鉴。
+- **Mastra**：ELv2 协议对"分发给用户本地"的桌面应用有实质风险，且 ADR-0006 的
+  F2 fork 改造可能与 ELv2 条款冲突。
+- **LangGraph.js / LlamaIndex.ts / codex / hermes / deepagent**：
+  分别因 Python绑定/生态小/Rust/偏重/Python 被排除或降为备选。
 
 ---
 
