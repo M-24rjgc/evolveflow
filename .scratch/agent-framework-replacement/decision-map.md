@@ -202,12 +202,60 @@ storage/domain/capabilities 怎么共存？
 
 - 框架是否强耦合自己的 ORM/DB？能否复用我们的 SQLite？
 - 框架的"工具调用"能否桥接到我们的 CapabilityRegistry？
-- 框架的"会话/记忆"和我们的 Dream/ai_sessions 表怎么对齐？
-  产出一份"接入点"清单。
+  - 框架的"会话/记忆"和我们的 Dream/ai_sessions 表怎么对齐？
+    产出一份"接入点"清单。
 
 ### Answer
 
-（待 research session 解决）
+调研于 2026-06-20，基于读 pi 仓库源码（packages/agent、coding-agent/docs）+ EvolveFlow 本地代码。
+
+#### 核心结论：起步用 SDK 模式 + 桥接扩展，4 个低风险接入点可直接做
+
+pi-agent-core **零数据库依赖**（仅依赖 pi-ai/ignore/typebox/yaml），SessionStorage 是接口抽象（默认 JSONL），这让共存极其干净。
+
+#### 5 个接入点
+
+**接入点1 · 数据层**：pi 无 DB 强耦合。SessionStorage 接口已抽象，默认 JsonlSessionRepo（落 ~/.pi/agent/sessions/\*.jsonl）。**起步姿态：完全隔离**——pi 用自带 JSONL，EvolveFlow 业务库不动，零耦合。中后期可选实现 SqliteSessionStorage（大工作量，按需）。ai_sessions/ai_messages 空壳表本就没在用，不碰。
+
+**接入点2 · 工具桥接**：pi 扩展用 `pi.registerTool({name, description, parameters: Type.Object(...), execute})`。写一个**桥接扩展**，session_start 时遍历 `registry.list()`，每个 capability 注册为 pi tool，execute 内调 `registry.invoke()`。schema 用 `Type.Unsafe(jsonSchema)` 兜底转换。mutating 能力按 ctx.mode 做 gate。**改动量小到中（~150行 + schema 转换测试）**。
+
+**接入点3 · 会话/记忆**：pi 会话是 JSONL 树（version 3，9种entry），比 ai_sessions 表丰富得多——不迁移，pi 用 JSONL。Dream 系统改造成 pi 扩展：监听 tool_result/message_end 写回 action_logs，监听 context/before_agent_start 注入 MemoryProjectionService 的偏好。pi-memctx（Markdown pack）可并存。
+
+**接入点4 · 嵌入方式**：**选 SDK 模式**（非 RPC）。在 sidecar.ts 进程内 `import { createAgentSession }`，省去 RPC 的 U+2028/U+2029 framing 坑和双进程管理。pi-ai 的 DeepSeek provider 替换自研 initAiEngine。**改动量中（替换循环，但能删不少代码）**。
+
+**接入点5 · 扩展预装**：桥接扩展/Dream扩展用本地路径 `pi install ./packages/...`；pi-memctx/context-mode 用 npm 包写入 settings.json packages 数组。打包时随 pi runtime 塞进 Tauri resources。
+
+#### 共存架构（SDK 模式）
+
+```
+desktop-tauri(React/Tauri) ──IPC── sidecar.rs ──spawn── sidecar.ts(Node)
+                                                         │
+                                          ┌──────────────┴──────────────┐
+                                          │  pi SDK (进程内嵌入)          │
+                                          │  createAgentSession()        │
+                                          │   ├ pi-agent-core (无DB)     │
+                                          │   ├ pi-ai (DeepSeek provider)│
+                                          │   ├ SessionStorage=JSONL     │
+                                          │   └ Extensions:             │
+                                          │       ├ evolveflow-bridge ──┼─→ CapabilityRegistry.invoke()
+                                          │       ├ evolveflow-dream ───┼─→ DreamOrchestrator
+                                          │       ├ pi-memctx (npm)     │
+                                          │       └ context-mode (npm)  │
+                                          └─────────────────────────────┘
+                                                         │
+                                          evolveflow-capabilities → domain → storage(SQLite)
+```
+
+#### 风险分级
+
+| 低风险（MVP可直接做）                       | 需深入设计（按需排期）                      |
+| ------------------------------------------- | ------------------------------------------- |
+| SDK 模式嵌入 pi                             | SqliteSessionStorage（跨进程SQL查询会话时） |
+| CapabilityRegistry→pi.registerTool 桥接扩展 | RPC framing（要进程隔离时）                 |
+| pi 用自带 JSONL SessionStorage              | Dream 改造成 pi 扩展（统一记忆层时）        |
+| 预装 pi-memctx/context-mode                 | 会话格式迁移决策（做统一历史UI前）          |
+| 复用 pi-ai 的 DeepSeek provider             | 扩展打包签名（发版前）                      |
+| SessionManager.inMemory() 做集成测试起步    | 作者集中度（已用 F2 fork 对冲）             |
 
 ---
 
@@ -223,12 +271,69 @@ F2 定了，但具体怎么落地？
 - 把框架整库 fork 进 evolveflow 仓库的哪个位置（packages/evolveflow-runtime/ 下？子模块？）
 - 砍哪些目录/模块（多用户、云、计费等），预估剥离工作量
 - 框架自带的 example/cli 要不要留
-- 我们的 sidecar.ts（JSON-RPC 入口 + Tauri 桥接）怎么和框架的入口对接
-  产出一份迁移步骤草案。
+  - 我们的 sidecar.ts（JSON-RPC 入口 + Tauri 桥接）怎么和框架的入口对接
+    产出一份迁移步骤草案。
 
 ### Answer
 
-（待 discuss session 解决）
+基于 #3 的 SDK 模式结论，落地策略如下。
+
+#### pi 代码的放置方式：vendor 进 packages/，不是 git submodule
+
+在 `packages/` 下新建两个目录，**把 pi 的源码直接复制进来**（vendor，符合 ADR-0006 F2"fork 一次自己接管"）：
+
+```
+packages/
+  evolveflow-vendor-pi-agent/    ← 复制自 pi/packages/agent (pi-agent-core)
+  evolveflow-vendor-pi-ai/       ← 复制自 pi/packages/ai (pi-ai, provider 适配)
+  evolveflow-runtime/            ← 改造：删自研循环，改用 SDK 嵌入
+  evolveflow-pi-bridge/          ← 新建：桥接扩展(CapabilityRegistry→pi tool)
+  evolveflow-pi-dream/           ← 新建：Dream 作为 pi 扩展（中期）
+  evolveflow-pi-presets/         ← 新建：预装配置(pi-memctx/context-mode 的 settings.json)
+  evolveflow-capabilities/       ← 不动
+  evolveflow-domain/             ← 不动
+  evolveflow-storage/            ← 不动
+  evolveflow-cli/                ← 不动（CLI 后续改用 pi SDK）
+```
+
+**为什么 vendor 而非 submodule**：F2 决定了不追上游，submodule 的"同步上游"语义反而成噪音；vendor 让我们自由改 pi 源码（如修 Issue #5226、加 DeepSeek 适配），且符合"复制改造不重写"。
+
+#### 砍什么 / 留什么
+
+| pi 的部分                           | 处置           | 理由                                    |
+| ----------------------------------- | -------------- | --------------------------------------- |
+| `packages/agent`（pi-agent-core）   | **留，vendor** | 核心 runtime，SDK 嵌入要用              |
+| `packages/ai`（pi-ai）              | **留，vendor** | provider 适配，DeepSeek 要靠它          |
+| `packages/coding-agent`（CLI 本体） | **删**         | 编码场景特化，EvolveFlow 不要 CLI agent |
+| `packages/tui`（终端 UI）           | **删**         | 桌面应用用 React，不要 TUI              |
+| pi 自带 skills（编码向）            | **删**         | EvolveFlow 有自己的 capability 体系     |
+| 顶层 docs/scripts/examples          | **删**         | 精简                                    |
+
+#### sidecar.ts 对接方式
+
+现有 sidecar.ts 的**外壳保留**（JSON-RPC 入口、Tauri stdin/stdout 桥接、ALLOWED_CAPABILITIES、reminder/daily-summary 调度器），**内核替换**：
+
+- 删：`initAiEngine`（自研 DeepSeek 循环）、自研 loop.ts 的 runConversation/compactConversation/estimateTokens
+- 替换为：`createAgentSession(...)` + 桥接扩展 + pi-ai 的 DeepSeek provider
+- 保留并复用：tools.ts 的 capabilityToToolName/toolToCapabilityName 映射逻辑（搬到桥接扩展）、ReminderService/DailySummaryScheduler（继续作为 sidecar 内调度器，不进 pi）
+- 保留：handleMessage 的 JSON-RPC 路由结构（可后续用路由表优化，见架构盘点 P1）
+
+#### 迁移步骤草案（分 commit，每步可验证）
+
+| 步  | 内容                                                                 | 验证                                           |
+| --- | -------------------------------------------------------------------- | ---------------------------------------------- |
+| 1   | vendor pi-agent + pi-ai 源码进 packages/，调通 build                 | `npm run build` 通过，pi 包可 import           |
+| 2   | 写 evolveflow-pi-bridge 桥接扩展骨架（registerTool 遍历 registry）   | 单元测试：bridge 把 task.create 注册为 pi tool |
+| 3   | sidecar.ts 内用 createAgentSession + bridge 跑通最小对话（DeepSeek） | 手测：AI 页发消息能回，能调 task.create        |
+| 4   | 删自研 loop.ts/client.ts（runConversation 等），保留 tools.ts 映射   | 现有 runtime 测试迁移/重写后通过               |
+| 5   | 接入会话持久化（pi JSONL 默认）+ 前端读历史                          | AI 页重启后能看到历史会话                      |
+| 6   | 预装 pi-memctx（settings.json packages）+ 验证记忆注入               | 对话中能看到记忆上下文                         |
+| 7   | Dream 改造为 pi 扩展（中期，单独排期）                               | Dream 随 session 生命周期运行                  |
+| 8   | 删 pi 的 coding-agent/tui/docs，清理打包                             | 打包体积可控                                   |
+
+#### 与现有质量门槛的关系
+
+每步都要过 `npm run build && npx vitest run && npm run lint`。步骤 4 的测试迁移是重点——现有 runtime 的 ai.test.ts（14用例）大部分要重写（因为 loop.ts 删了），但 context.ts/tools.ts 的测试可保留。
 
 ---
 
