@@ -2,7 +2,7 @@ import Database from 'better-sqlite3';
 import * as fs from 'fs';
 import * as path from 'path';
 
-const LATEST_VERSION = 2;
+const LATEST_VERSION = 3;
 
 /**
  * Migration array: each entry defines a schema version and the SQL to reach it.
@@ -238,11 +238,29 @@ const MIGRATIONS: Array<{ version: number; sql: string }> = [
       CREATE INDEX IF NOT EXISTS idx_dream_insights_expires ON dream_insights(expires_at);
     `,
   },
+  {
+    // v3: add updated_at to dream_insights. UndoService.revertMemoryAction
+    // updates rows with `updated_at = ?`, which previously failed with
+    // "no column named updated_at" because the v2 table only had created_at.
+    version: 3,
+    sql: `
+      ALTER TABLE dream_insights ADD COLUMN updated_at TEXT NOT NULL DEFAULT (datetime('now'));
+    `,
+  },
 ];
 
 export class EvolveFlowDatabase {
   private db: Database.Database;
   private dbPath: string;
+  /**
+   * A stable proxy handle that forwards all property access to the currently
+   * active underlying better-sqlite3 connection. The proxy reference stays the
+   * same across close()/reopen() cycles, so any code that captured
+   * `db.getDb()` once (e.g. domain services) keeps working after a backup
+   * restore reopens the connection. Without this, those holders would be left
+   * with a dead handle and every subsequent query would throw.
+   */
+  private dbHandle: Database.Database;
 
   constructor(dbPath: string) {
     const dir = path.dirname(dbPath);
@@ -252,16 +270,39 @@ export class EvolveFlowDatabase {
 
     this.dbPath = dbPath;
     this.db = new Database(dbPath);
+    this.dbHandle = this.createHandleProxy();
 
     // WAL mode and performance tuning
+    this.applyPragmas();
+
+    this.initialize();
+  }
+
+  private createHandleProxy(): Database.Database {
+    // The proxy forwards every property access to the live underlying
+    // connection (`this.db`). We read `this.db` through an arrow function so
+    // it always resolves against the current field after a close()/reopen()
+    // cycle, without aliasing `this` into a local (which trips
+    // @typescript-eslint/no-this-alias).
+    const liveDb: () => Database.Database = () => this.db;
+    return new Proxy({} as Database.Database, {
+      get(_target, prop) {
+        const current = liveDb();
+        const value = (current as unknown as Record<PropertyKey, unknown>)[prop];
+        return typeof value === 'function'
+          ? (value as (...args: unknown[]) => unknown).bind(current)
+          : value;
+      },
+    });
+  }
+
+  private applyPragmas(): void {
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('synchronous = NORMAL');
     this.db.pragma('cache_size = -64000');
     this.db.pragma('busy_timeout = 5000');
     this.db.pragma('temp_store = MEMORY');
     this.db.pragma('foreign_keys = ON');
-
-    this.initialize();
   }
 
   /**
@@ -304,21 +345,29 @@ export class EvolveFlowDatabase {
   }
 
   private getSchemaVersion(): number {
-    const row = this.db.prepare("SELECT value FROM app_meta WHERE key = 'schema_version'").get() as { value: string } | undefined;
+    const row = this.db.prepare("SELECT value FROM app_meta WHERE key = 'schema_version'").get() as
+      | { value: string }
+      | undefined;
     return row ? parseInt(row.value, 10) : 0;
   }
 
   private setSchemaVersion(version: number): void {
-    this.db.prepare("INSERT OR REPLACE INTO app_meta (key, value) VALUES ('schema_version', ?)").run(String(version));
+    this.db
+      .prepare("INSERT OR REPLACE INTO app_meta (key, value) VALUES ('schema_version', ?)")
+      .run(String(version));
   }
 
   getRevision(): number {
-    const row = this.db.prepare("SELECT value FROM app_meta WHERE key = 'revision'").get() as { value: string } | undefined;
+    const row = this.db.prepare("SELECT value FROM app_meta WHERE key = 'revision'").get() as
+      | { value: string }
+      | undefined;
     return row ? parseInt(row.value, 10) : 0;
   }
 
   setRevision(revision: number): void {
-    this.db.prepare("INSERT OR REPLACE INTO app_meta (key, value) VALUES ('revision', ?)").run(String(revision));
+    this.db
+      .prepare("INSERT OR REPLACE INTO app_meta (key, value) VALUES ('revision', ?)")
+      .run(String(revision));
   }
 
   incrementRevision(): number {
@@ -329,7 +378,7 @@ export class EvolveFlowDatabase {
   }
 
   getDb(): Database.Database {
-    return this.db;
+    return this.dbHandle;
   }
 
   getDbPath(): string {
@@ -338,6 +387,17 @@ export class EvolveFlowDatabase {
 
   close(): void {
     this.db.close();
+  }
+
+  /**
+   * Reopen the underlying connection after it has been closed (e.g. by a
+   * backup restore that replaced the file on disk). All existing handles
+   * obtained via getDb() remain valid because they are proxies that forward
+   * to the freshly opened connection.
+   */
+  reopen(): void {
+    this.db = new Database(this.dbPath);
+    this.applyPragmas();
   }
 }
 

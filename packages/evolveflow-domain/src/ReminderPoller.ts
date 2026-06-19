@@ -20,24 +20,32 @@ export class ReminderPoller {
   private checkIntervalMs: number;
   private intervalId: ReturnType<typeof setInterval> | null = null;
   private lastTriggeredDate: string | null = null;
+  private readonly dailySummaryHour: number;
 
-  constructor(db: Database.Database, checkIntervalMs: number = 10000) {
+  constructor(
+    db: Database.Database,
+    checkIntervalMs: number = 10000,
+    dailySummaryHour: number = 23
+  ) {
     this.db = db;
     this.checkIntervalMs = checkIntervalMs;
+    this.dailySummaryHour = dailySummaryHour;
   }
 
   pollDueReminders(): PolledReminder[] {
     const now = new Date().toISOString();
-    const rows = this.db.prepare(
-      "SELECT * FROM reminders WHERE status = 'pending' AND trigger_at <= ?"
-    ).all(now) as Record<string, unknown>[];
+    const rows = this.db
+      .prepare("SELECT * FROM reminders WHERE status = 'pending' AND trigger_at <= ?")
+      .all(now) as Record<string, unknown>[];
 
     this.lastPollTime = new Date();
 
     if (rows.length > 0) {
       const ids = rows.map((r) => r.id as string);
       const placeholders = ids.map(() => '?').join(',');
-      this.db.prepare(`UPDATE reminders SET status = 'triggered' WHERE id IN (${placeholders})`).run(...ids);
+      this.db
+        .prepare(`UPDATE reminders SET status = 'triggered' WHERE id IN (${placeholders})`)
+        .run(...ids);
     }
 
     return rows.map((r) => ({
@@ -53,15 +61,21 @@ export class ReminderPoller {
     const now = new Date().toISOString();
     const results: FollowUpResult[] = [];
 
-    const overdueTasks = this.db.prepare(
-      "SELECT id, title, due_date FROM tasks WHERE status = 'pending' AND due_date IS NOT NULL AND due_date <= ?"
-    ).all(now) as Record<string, unknown>[];
+    const overdueTasks = this.db
+      .prepare(
+        "SELECT id, title, due_date FROM tasks WHERE status = 'pending' AND due_date IS NOT NULL AND due_date <= ?"
+      )
+      .all(now) as Record<string, unknown>[];
 
     for (const task of overdueTasks) {
-      const existing = this.db.prepare(
-        "SELECT 1 FROM reminders WHERE task_id = ? AND message LIKE '催办%' AND status = 'pending'"
-      ).get(task.id as string);
-      if (existing) {continue;}
+      const existing = this.db
+        .prepare(
+          "SELECT 1 FROM reminders WHERE task_id = ? AND message LIKE '催办%' AND status = 'pending'"
+        )
+        .get(task.id as string);
+      if (existing) {
+        continue;
+      }
 
       const dueDate = new Date(task.due_date as string);
       const overdueMinutes = Math.floor((Date.now() - dueDate.getTime()) / 60000);
@@ -76,10 +90,14 @@ export class ReminderPoller {
       }
 
       const reminderId = `followup-${task.id}-${Date.now()}`;
-      this.db.prepare(`
+      this.db
+        .prepare(
+          `
         INSERT INTO reminders (id, task_id, trigger_at, status, message, created_at)
         VALUES (?, ?, ?, 'pending', ?, ?)
-      `).run(reminderId, task.id as string, now, `催办：任务"${task.title}"已超时`, now);
+      `
+        )
+        .run(reminderId, task.id as string, now, `催办：任务"${task.title}"已超时`, now);
 
       results.push({
         reminderId,
@@ -100,7 +118,13 @@ export class ReminderPoller {
       return false;
     }
 
-    if (now.getHours() === 23 && now.getMinutes() === 0) {
+    // Fire once the configured trigger time has passed today, even if the
+    // exact minute was missed (process was down/busy). Previously this only
+    // matched the single minute 23:00, which silently skipped the day
+    // whenever that minute wasn't polled.
+    const triggerTime = new Date(now);
+    triggerTime.setHours(this.dailySummaryHour, 0, 0, 0);
+    if (now.getTime() >= triggerTime.getTime()) {
       this.lastTriggeredDate = todayStr;
       return true;
     }
@@ -117,9 +141,11 @@ export class ReminderPoller {
     cutoff.setDate(cutoff.getDate() - 7);
     const cutoffISO = cutoff.toISOString();
 
-    const result = this.db.prepare(
-      "DELETE FROM reminders WHERE status IN ('triggered', 'dismissed') AND trigger_at < ?"
-    ).run(cutoffISO);
+    const result = this.db
+      .prepare(
+        "DELETE FROM reminders WHERE status IN ('triggered', 'dismissed') AND trigger_at < ?"
+      )
+      .run(cutoffISO);
 
     if (result.changes > 0) {
       console.log(`Cleaned up ${result.changes} old reminder(s)`);

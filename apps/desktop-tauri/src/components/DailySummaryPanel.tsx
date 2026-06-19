@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { callCapability } from '../lib/tauri';
 import { useToast } from './Toast';
 import { useI18n } from '../lib/i18n';
+import { localIsoDate } from '../lib/date';
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -88,7 +89,7 @@ export default function DailySummaryPanel() {
   const [expandedDayData, setExpandedDayData] = useState<Map<string, DailySummary>>(new Map());
   const [loadingDay, setLoadingDay] = useState<string | null>(null);
 
-  const today = new Date().toISOString().split('T')[0];
+  const today = localIsoDate();
 
   // ── Load Today's Summary ────────────────────────────────────
 
@@ -202,7 +203,7 @@ export default function DailySummaryPanel() {
       for (let i = 1; i <= 7; i++) {
         const d = new Date();
         d.setDate(d.getDate() - i);
-        const dateStr = d.toISOString().split('T')[0];
+        const dateStr = localIsoDate(d);
         try {
           const result = await callCapability('task.list', {}) as {
             success: boolean;

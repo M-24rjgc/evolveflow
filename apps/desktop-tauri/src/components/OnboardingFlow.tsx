@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { ArrowRight, CheckCircle2, ListPlus, Sparkles } from 'lucide-react';
 import { callCapability } from '../lib/tauri';
 import { useI18n } from '../lib/i18n';
+import { localIsoDate } from '../lib/date';
 
 interface OnboardingFlowProps {
   onComplete: () => void;
@@ -51,7 +52,7 @@ export default function OnboardingFlow({ onComplete }: OnboardingFlowProps) {
 
   async function handleViewSchedule() {
     try {
-      await callCapability('schedule.plan_day', { date: new Date().toISOString().split('T')[0] });
+      await callCapability('schedule.plan_day', { date: localIsoDate() });
       await callCapability('preference.set', { key: 'is_onboarded', value: 'true' });
     } catch (err) {
       console.error('Onboarding schedule plan failed:', err);

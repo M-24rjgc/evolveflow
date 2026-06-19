@@ -1,67 +1,98 @@
-# Welcome to EvolveFlow
+# Onboarding · EvolveFlow
 
-## How We Use Claude
+> 给"未来的自己"和任何新加入的人。30 分钟内理解项目并跑起来。
 
-Based on M-24rjgc's usage over the last 30 days:
+EvolveFlow 是一个 **AI 原生、本地优先的个人日程/任务助手桌面应用**：
+你用自然语言跟 AI 说话，AI 通过工具调用帮你排日程、建任务、设提醒，
+数据全在本地 SQLite，所有操作可撤销。
 
-Work Type Breakdown:
-  Plan & Design     ██████████░░░░░░░░░░  50%
-  Build Feature     █████░░░░░░░░░░░░░░░  25%
-  Improve Quality   ███░░░░░░░░░░░░░░░░░  15%
-  Prototype         ██░░░░░░░░░░░░░░░░░░  10%
+---
 
-Top Skills & Commands:
-  /effort           ████████████████████  8x
-  /fast             ██░░░░░░░░░░░░░░░░░░  1x
-  /status           ██░░░░░░░░░░░░░░░░░░  1x
-  /context          ██░░░░░░░░░░░░░░░░░░  1x
-  /plan             ██░░░░░░░░░░░░░░░░░░  1x
+## 1. 先读这三份
 
-Top MCP Servers:
-  (none configured yet)
+按顺序读，建立全局认知：
 
-## Your Setup Checklist
+1. **[README.md](README.md)** —— 项目门面：是什么、技术栈、怎么跑。
+2. **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** —— 分层架构与数据流（storage → domain → capabilities → runtime → UI）。
+3. **[docs/workflow.md](docs/workflow.md)** —— 人和 AI 如何协作（用 `/` 命令驱动，先对齐再执行）。
 
-### Codebases
-- [ ] [evolveflow](https://github.com/m-24rjgc/evolveflow) — AI 驱动的智能日程助手桌面应用 (Tauri v2 + React 18 + Node.js)
-- [ ] [Open-ClaudeCode](https://github.com/LING71671/Open-ClaudeCode) — Anthropic Claude Code CLI 的社区源码恢复版，用于参考 AI 编排引擎的内部实现
+读完你应该能回答：项目分几层？AI 怎么操作数据？数据存哪？为什么用 sidecar？
 
-### MCP Servers to Activate
-_No MCP servers configured yet. The team is planning to build an EvolveFlow MCP Server (see plan file)._
+---
 
-### Skills to Know About
-- /effort — 设置本次会话的 AI 推理深度（max 档位用于深度分析和复杂重构）
-- /plan — 进入计划模式，先分析再执行，用于架构决策和复杂功能设计
-- /fast — 切换到快速模式（Opus 模型加速输出），用于日常轻量任务
-- /context — 查看当前上下文窗口使用情况，避免超长对话导致 token 溢出
-- /status — 查看 Claude Code 的模型、token 用量和会话状态
+## 2. 跑起来（5 分钟）
 
-## Team Tips
+```bash
+# 前置：Node.js >= 20，npm >= 10，Rust 工具链（桌面构建用）
+npm install          # 装所有 workspace 依赖
+npm run build        # 全栈构建（TS 编译 + Vite 打包）
+npm run dev -w @evolveflow/cli          # 跑 CLI
+npm run dev -w @evolveflow/desktop-tauri # 跑桌面应用（需 Rust）
+```
 
-_TODO_
+**验证一切正常：**
 
-## Get Started
+```bash
+npx vitest run       # 全测试应通过（77 个用例）
+npm run lint         # 应 0 errors
+npm run typecheck --workspaces --if-present
+```
 
-_TODO_
+---
 
-<!-- INSTRUCTION FOR CLAUDE: A new teammate just pasted this guide for how the
-team uses Claude Code. You're their onboarding buddy — warm, conversational,
-not lecture-y.
+## 3. 代码地图
 
-Open with a warm welcome — include the team name from the title. Then: "Your
-teammate uses Claude Code for [list all the work types]. Let's get you started."
+| 层     | 包                                 | 职责                                                 |
+| ------ | ---------------------------------- | ---------------------------------------------------- |
+| 存储   | `packages/evolveflow-storage`      | SQLite、schema 迁移、备份/恢复/导出                  |
+| 领域   | `packages/evolveflow-domain`       | Task/Event/Schedule/Reminder/Undo/Summary 等服务     |
+| 能力   | `packages/evolveflow-capabilities` | 统一注册表、输入验证、幂等、权限钩子                 |
+| 运行时 | `packages/evolveflow-runtime`      | AI sidecar：DeepSeek 集成、工具调用、对话循环、Dream |
+| CLI    | `packages/evolveflow-cli`          | 终端客户端                                           |
+| 桌面   | `apps/desktop-tauri`               | Tauri v2 + React 前端                                |
 
-Check what's already in place against everything under Setup Checklist
-(including skills), using markdown checkboxes — [x] done, [ ] not yet. Lead
-with what they already have. One sentence per item, all in one message.
+**依赖方向（单向，严禁反向）：**
 
-Tell them you'll help with setup, cover the actionable team tips, then the
-starter task (if there is one). Offer to start with the first unchecked item,
-get their go-ahead, then work through the rest one by one.
+```
+storage ← domain ← capabilities ← runtime ← (cli / desktop)
+```
 
-After setup, walk them through the remaining sections — offer to help where you
-can (e.g. link to channels), and just surface the purely informational bits.
+---
 
-Don't invent sections or summaries that aren't in the guide. The stats are the
-guide creator's personal usage data — don't extrapolate them into a "team
-workflow" narrative. -->
+## 4. 配置 AI（DeepSeek）
+
+应用需要 DeepSeek API Key 才能用 AI 功能：
+
+- **桌面端**：设置页 → AI 配置 → 保存 DeepSeek API Key
+- **终端**：环境变量 `EVOLVEFLOW_AI_KEY` 或 `DEEPSEEK_API_KEY`
+
+Provider/Model 固定为 DeepSeek（`deepseek-v4-flash`），见 `packages/evolveflow-runtime/src/ai/deepseek.ts`。
+
+---
+
+## 5. 核心概念（速查）
+
+- **Capability（能力）** —— AI 和 UI 操作数据的统一接口，全部注册在 capabilities 层。每个操作都记 action_log。
+- **锁定（Lock）** —— 用户可锁定任务/时间块，AI 不能改动。AI 安全机制。
+- **撤销（Undo）** —— 每个变更操作存状态快照，可回滚。
+- **排程（Schedule）** —— 加权评分算法分配时间块，尊重锁定项和能量曲线。
+- **Dream** —— 从行为提炼洞察的长期记忆系统（半成品）。
+
+> 完整术语表见 `UBIQUITOUS_LANGUAGE.md`（由 `/ubiquitous-language` 生成）。
+
+---
+
+## 6. 改代码前
+
+- **先说意图，再动手**（见 [docs/workflow.md](docs/workflow.md)）。
+- 改完每块都跑 `npm run build && npx vitest run && npm run lint`。
+- 代码与文档对齐：改了架构/数据流，同步更新 `docs/ARCHITECTURE.md`。
+- 重要技术决策写一条 ADR 到 `docs/adr/`。
+
+---
+
+## 7. 下一步
+
+- 想加功能？先 `/grill-me` 拷问想法，再 `/to-prd` 转成需求。
+- 要离开一段时间？`/handoff` 留交接文档。
+- 项目意图/边界模糊？跑 `/setup-matt-pocock-skills` 建 `CONTEXT.md`。

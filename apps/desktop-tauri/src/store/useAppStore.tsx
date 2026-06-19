@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useReducer, useCallback, useEffect, useRef, type ReactNode } from 'react';
 import { callCapability } from '../lib/tauri';
+import { addLocalDays, localIsoDate } from '../lib/date';
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -214,8 +215,9 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
     }
 
     try {
-      const today = new Date().toISOString().split('T')[0];
-      const tomorrow = new Date(Date.now() + 86400000).toISOString().split('T')[0];
+      const currentDate = new Date();
+      const today = localIsoDate(currentDate);
+      const tomorrow = localIsoDate(addLocalDays(currentDate, 1));
 
       const [taskResult, eventResult, remResult, aiStatusResult, buddyResult] =
         await Promise.allSettled([

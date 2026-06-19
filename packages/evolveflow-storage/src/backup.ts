@@ -67,7 +67,11 @@ export class BackupService {
       revision: this.db.getRevision(),
       dbHash,
     };
-    fs.writeFileSync(path.join(backupDir, 'manifest.json'), JSON.stringify(manifest, null, 2), 'utf-8');
+    fs.writeFileSync(
+      path.join(backupDir, 'manifest.json'),
+      JSON.stringify(manifest, null, 2),
+      'utf-8'
+    );
 
     // Enforce backup rotation: keep at most maxBackups
     const allBackups = listBackupsSorted(outputPath);
@@ -76,7 +80,9 @@ export class BackupService {
       for (const old of toDelete) {
         fs.rmSync(old, { recursive: true });
       }
-      console.log(`Backup rotation: removed ${toDelete.length} old backup(s), keeping ${maxBackups}`);
+      console.log(
+        `Backup rotation: removed ${toDelete.length} old backup(s), keeping ${maxBackups}`
+      );
     }
 
     return backupDir;
@@ -111,7 +117,9 @@ export class BackupService {
     if (manifest.dbHash) {
       const actualHash = computeFileHash(dbBackupPath);
       if (actualHash !== manifest.dbHash) {
-        console.error(`Verify failed: hash mismatch (expected ${manifest.dbHash}, got ${actualHash})`);
+        console.error(
+          `Verify failed: hash mismatch (expected ${manifest.dbHash}, got ${actualHash})`
+        );
         return false;
       }
     }
@@ -151,7 +159,7 @@ export class BackupService {
     const restorePointDir = path.join(
       this.dataDir,
       'backups',
-      `restore-point-${new Date().toISOString().replace(/[:.]/g, '-')}`,
+      `restore-point-${new Date().toISOString().replace(/[:.]/g, '-')}`
     );
     fs.mkdirSync(restorePointDir, { recursive: true });
 
@@ -179,11 +187,15 @@ export class BackupService {
     fs.writeFileSync(
       path.join(restorePointDir, 'manifest.json'),
       JSON.stringify(restoreManifest, null, 2),
-      'utf-8',
+      'utf-8'
     );
     console.log(`Restore-point created at ${restorePointDir}`);
 
     // --- Perform the restore ---
+    // Close the live connection so the underlying file can be replaced on
+    // disk, then reopen it. reopen() swaps the internal connection while
+    // keeping every handle obtained via getDb() (held by the domain services)
+    // valid through the proxy — without it, all those handles would be dead.
     this.db.close();
 
     fs.copyFileSync(dbBackupPath, dbPath);
@@ -201,11 +213,16 @@ export class BackupService {
       }
     }
 
+    // Reopen the same EvolveFlowDatabase against the restored file.
+    this.db.reopen();
+
     // Rebuild reminder queue from restored database
-    this.db = new EvolveFlowDatabase(dbPath);
-    const pendingReminders = this.db.getDb().prepare(
-      "SELECT id, trigger_at, message, task_id, event_id FROM reminders WHERE status = 'pending'",
-    ).all() as Record<string, unknown>[];
+    const pendingReminders = this.db
+      .getDb()
+      .prepare(
+        "SELECT id, trigger_at, message, task_id, event_id FROM reminders WHERE status = 'pending'"
+      )
+      .all() as Record<string, unknown>[];
     console.log(`Restored ${pendingReminders.length} pending reminders`);
   }
 }

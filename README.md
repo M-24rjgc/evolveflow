@@ -31,7 +31,7 @@ EvolveFlow is an open-source, AI-native personal scheduling assistant. It combin
 │              React + Vite + Tauri v2                     │
 ├─────────────────────────────────────────────────────────┤
 │                       AI Runtime                         │
-│              Anthropic Claude API Integration             │
+│         DeepSeek API (Anthropic-compatible endpoint)      │
 │              Tool-based interaction                       │
 ├─────────────────────────────────────────────────────────┤
 │                    CLI Interface                          │
@@ -118,14 +118,12 @@ evolveflow/
 │   ├── evolveflow-storage/        # SQLite database, migrations, backup
 │   ├── evolveflow-domain/         # Domain services (tasks, events, schedule, etc.)
 │   ├── evolveflow-capabilities/   # Capability registry (unified API layer)
-│   ├── evolveflow-cli/            # CLI interface (Commander)
-│   └── evolveflow-ui-shared/      # Shared UI types and utilities
+│   ├── evolveflow-runtime/        # AI runtime sidecar (DeepSeek integration, tools, loop)
+│   └── evolveflow-cli/            # CLI interface (Commander)
 ├── apps/
 │   └── desktop-tauri/             # Tauri v2 desktop application (React + Vite)
-├── runtime/
-│   ├── src/ai/                    # AI integration (Anthropic Claude API)
-│   └── src/sidecar.ts             # Sidecar process for AI runtime
-├── tests/                         # Integration tests
+├── tests/                         # Cross-package integration tests
+├── docs/                          # Architecture, contributing, workflow, ADRs
 ├── .github/                       # CI/CD workflows and Dependabot config
 ├── .husky/                        # Pre-commit hooks
 ├── vitest.config.ts               # Vitest test configuration
@@ -137,22 +135,23 @@ evolveflow/
 
 ## Development Guides
 
-- [Architecture Overview](ARCHITECTURE.md) -- Learn about the system design and data flow
-- [Contributing Guide](CONTRIBUTING.md) -- How to contribute, coding standards, PR process
-- [Changelog](CHANGELOG.md) -- Release history
+- [Architecture Overview](docs/ARCHITECTURE.md) -- Learn about the system design and data flow
+- [Contributing Guide](docs/CONTRIBUTING.md) -- How to contribute, coding standards, PR process
+- [Collaboration Workflow](docs/workflow.md) -- How humans and AI work together on this project
+- [Changelog](docs/CHANGELOG.md) -- Release history
 
 ---
 
 ## Key Technologies
 
-| Layer | Technology |
-|-------|-----------|
-| Database | SQLite via better-sqlite3 |
-| Backend | TypeScript, Node.js |
-| Desktop | Tauri v2, React, Vite |
-| AI | Anthropic Claude API |
-| Testing | Vitest, ESLint, Prettier |
-| CI/CD | GitHub Actions |
+| Layer    | Technology                                   |
+| -------- | -------------------------------------------- |
+| Database | SQLite via better-sqlite3                    |
+| Backend  | TypeScript, Node.js                          |
+| Desktop  | Tauri v2, React, Vite                        |
+| AI       | DeepSeek API (Anthropic-compatible endpoint) |
+| Testing  | Vitest, ESLint, Prettier                     |
+| CI/CD    | GitHub Actions                               |
 
 ---
 

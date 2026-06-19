@@ -3,11 +3,10 @@
   "private": true,
   "workspaces": [
     "packages/*",
-    "apps/*",
-    "runtime"
+    "apps/*"
   ],
   "scripts": {
-    "build": "npm run build -w @evolveflow/storage && npm run build -w @evolveflow/domain && npm run build -w @evolveflow/capabilities && npm run build -w @evolveflow/runtime && npm run build -w @evolveflow/cli && npm run build -w @evolveflow/ui-shared && npm run build -w @evolveflow/desktop-tauri",
+    "build": "npm run build -w @evolveflow/storage && npm run build -w @evolveflow/domain && npm run build -w @evolveflow/capabilities && npm run build -w @evolveflow/runtime && npm run build -w @evolveflow/cli && npm run build -w @evolveflow/desktop-tauri",
     "lint": "npm run lint --workspaces --if-present",
     "lint:fix": "npm run lint:fix --workspaces --if-present",
     "format": "prettier --check .",

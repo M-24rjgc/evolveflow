@@ -126,6 +126,75 @@ describe('Capability Registry', () => {
     expect(result2.success).toBe(true);
   });
 
+  it('should fire onAfterInvoke hooks after a successful invoke', async () => {
+    const registry = createRegistry(db);
+    const calls: Array<{ name: string; input: Record<string, unknown> }> = [];
+    registry.onAfterInvoke((name, input, _ctx, result) => {
+      if (result.success) {
+        calls.push({ name, input });
+      }
+    });
+
+    await registry.invoke(
+      'task.create',
+      { title: 'Hook task' },
+      {
+        actor: 'user',
+        origin: 'gui',
+      }
+    );
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].name).toBe('task.create');
+    expect(calls[0].input).toEqual({ title: 'Hook task' });
+  });
+
+  it('should not break invoke when an onAfterInvoke hook throws', async () => {
+    const registry = createRegistry(db);
+    registry.onAfterInvoke(() => {
+      throw new Error('hook boom');
+    });
+
+    // The triggering invoke must still succeed despite the hook throwing.
+    const result = await registry.invoke(
+      'task.create',
+      { title: 'Survives hook' },
+      {
+        actor: 'user',
+        origin: 'gui',
+      }
+    );
+    expect(result.success).toBe(true);
+  });
+
+  it('should reject inputs whose declared types do not match the schema', async () => {
+    const registry = createRegistry(db);
+
+    // duration_minutes is declared as number; passing a string must be rejected
+    // before the handler runs, instead of being silently persisted.
+    const result = await registry.invoke(
+      'task.create',
+      { title: 'Bad duration', duration_minutes: '30' as unknown as number },
+      { actor: 'user', origin: 'gui' }
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('duration_minutes');
+  });
+
+  it('should reject boolean fields passed as strings', async () => {
+    const registry = createRegistry(db);
+
+    const result = await registry.invoke(
+      'task.lock',
+      { task_id: 'does-not-exist', locked: 'true' as unknown as boolean },
+      { actor: 'user', origin: 'gui' }
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('locked');
+  });
+
   it('should increment revision after mutating call', async () => {
     const registry = createRegistry(db);
     const revBefore = db.getRevision();
@@ -205,6 +274,41 @@ describe('Capability Registry', () => {
     expect(JSON.stringify(readResult.data)).toContain('database exam');
     expect(searchResult.success).toBe(true);
     expect(JSON.stringify(searchResult.data)).toContain('notes.txt');
+  });
+
+  it('should reject file paths that only share the workspace prefix', async () => {
+    const outsideDir = `${workspaceTmpDir}-outside`;
+    fs.mkdirSync(outsideDir, { recursive: true });
+    fs.writeFileSync(path.join(outsideDir, 'leak.txt'), 'outside workspace', 'utf8');
+
+    try {
+      const registry = createRegistry(db);
+      const result = await registry.invoke(
+        'file.read',
+        { path: path.join(outsideDir, 'leak.txt') },
+        { actor: 'cli', origin: 'cli' }
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('workspace');
+    } finally {
+      fs.rmSync(outsideDir, { recursive: true, force: true });
+    }
+  });
+
+  it('should reject backup deletion outside the backups directory', async () => {
+    const outsideBackupDir = path.join(tmpDir, 'backups-other', 'evolveflow-backup-outside');
+    fs.mkdirSync(outsideBackupDir, { recursive: true });
+
+    const registry = createRegistry(db, tmpDir);
+    const result = await registry.invoke(
+      'backup.delete',
+      { path: outsideBackupDir },
+      { actor: 'cli', origin: 'cli' }
+    );
+
+    expect(result.success).toBe(false);
+    expect(fs.existsSync(outsideBackupDir)).toBe(true);
   });
 
   it('should clear generated schedule blocks and keep protected blocks', async () => {

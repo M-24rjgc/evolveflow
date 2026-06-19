@@ -13,6 +13,7 @@ import {
 import { callCapability } from '../lib/tauri';
 import DreamInsightsPanel from '../components/DreamInsightsPanel';
 import { useI18n } from '../lib/i18n';
+import { localIsoDate } from '../lib/date';
 import { EmptyPanel, MetricCard, PageHeader, PageShell, Panel, SegmentedTabs } from '../components/PageChrome';
 
 interface TaskRecord {
@@ -68,7 +69,7 @@ function getWeekDates(): string[] {
   for (let i = 6; i >= 0; i--) {
     const date = new Date();
     date.setDate(date.getDate() - i);
-    dates.push(date.toISOString().split('T')[0]);
+    dates.push(localIsoDate(date));
   }
   return dates;
 }

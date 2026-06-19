@@ -62,14 +62,38 @@ export function createRegistry(db: EvolveFlowDatabase, dataDir?: string): Capabi
   const backupOutputDir = dataDir ? path.join(dataDir, 'backups') : undefined;
   const workspaceRoot = path.resolve(process.env.EVOLVEFLOW_WORKSPACE_ROOT || process.cwd());
 
+  const isPathInside = (root: string, candidate: string): boolean => {
+    const relative = path.relative(root, candidate);
+    return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+  };
+
   const resolveWorkspacePath = (inputPath: unknown): string => {
     if (typeof inputPath !== 'string' || !inputPath.trim()) {
       throw new Error('path is required');
     }
     const rawPath = inputPath.trim();
     const resolved = path.resolve(workspaceRoot, rawPath);
-    if (!resolved.startsWith(workspaceRoot)) {
+    if (!isPathInside(workspaceRoot, resolved)) {
       throw new Error('Path must stay inside the workspace');
+    }
+    return resolved;
+  };
+
+  const resolveBackupPath = (inputPath: unknown, allowedPrefixes: string[]): string => {
+    if (!backupOutputDir) {
+      throw new Error('Backup service not available');
+    }
+    if (typeof inputPath !== 'string' || !inputPath.trim()) {
+      throw new Error('Backup path is required');
+    }
+
+    const backupRoot = path.resolve(backupOutputDir);
+    const resolved = path.resolve(inputPath.trim());
+    if (resolved === backupRoot || !isPathInside(backupRoot, resolved)) {
+      throw new Error('Backup path must stay inside the backups directory');
+    }
+    if (!allowedPrefixes.some((prefix) => path.basename(resolved).startsWith(prefix))) {
+      throw new Error('Backup path must be an evolveflow backup directory');
     }
     return resolved;
   };
@@ -1227,7 +1251,8 @@ export function createRegistry(db: EvolveFlowDatabase, dataDir?: string): Capabi
         return { success: false, error: 'Backup service not available' };
       }
       try {
-        const valid = backupService.verifyBackup(input.path as string);
+        const backupPath = resolveBackupPath(input.path, ['evolveflow-backup-', 'restore-point-']);
+        const valid = backupService.verifyBackup(backupPath);
         return {
           success: true,
           data: { valid, error: valid ? undefined : 'Backup verification failed' },
@@ -1249,7 +1274,8 @@ export function createRegistry(db: EvolveFlowDatabase, dataDir?: string): Capabi
         return { success: false, error: 'Backup service not available' };
       }
       try {
-        backupService.restoreFrom(input.path as string);
+        const backupPath = resolveBackupPath(input.path, ['evolveflow-backup-', 'restore-point-']);
+        backupService.restoreFrom(backupPath);
         return { success: true };
       } catch (e) {
         return { success: false, error: (e as Error).message };
@@ -1264,11 +1290,11 @@ export function createRegistry(db: EvolveFlowDatabase, dataDir?: string): Capabi
     inputSchema: { type: 'object', required: ['path'], properties: { path: { type: 'string' } } },
     mutating: true,
     handler: wrapMutating('backup.delete', async (input) => {
-      const backupPath = input.path as string;
-      if (!backupPath || !fs.existsSync(backupPath)) {
-        return { success: false, error: 'Backup path not found' };
-      }
       try {
+        const backupPath = resolveBackupPath(input.path, ['evolveflow-backup-']);
+        if (!fs.existsSync(backupPath)) {
+          return { success: false, error: 'Backup path not found' };
+        }
         fs.rmSync(backupPath, { recursive: true });
         return { success: true };
       } catch (e) {

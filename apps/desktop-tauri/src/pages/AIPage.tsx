@@ -65,6 +65,14 @@ interface DreamStatus {
   sessionCount: number;
 }
 
+interface ActiveStreamRequest {
+  sessionId: string;
+  message: string;
+  mode: 'chat' | 'plan' | 'auto' | 'yolo';
+  receivedChunk: boolean;
+  fallbackStarted: boolean;
+}
+
 // ── Constants ───────────────────────────────────────────────────
 
 const STREAM_TIMEOUT_MS = 30000;
@@ -269,7 +277,7 @@ export default function AIPage() {
   const [contextData, setContextData] = useState<Record<string, unknown> | null>(null);
   const [tokenUsage, setTokenUsage] = useState<{ input: number; output: number }>({ input: 0, output: 0 });
   const [streamError, setStreamError] = useState<string | null>(null);
-  const [agentMode, setAgentMode] = useState<'chat' | 'plan' | 'auto' | 'yolo'>('auto');
+  const [agentMode, setAgentMode] = useState<'chat' | 'plan' | 'auto' | 'yolo'>('chat');
   const [pendingApprovals, setPendingApprovals] = useState<PendingApproval[]>([]);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -277,6 +285,7 @@ export default function AIPage() {
   const mountedRef = useRef(true);
   const lastChunkTimeRef = useRef<number>(Date.now());
   const initializedRef = useRef(false);
+  const activeStreamRef = useRef<ActiveStreamRequest | null>(null);
 
   // ── Throttled Stream Batching ─────────────────────────────────
   // Only flush accumulated chunk content to React state at most once
@@ -412,9 +421,19 @@ export default function AIPage() {
     // Use dedicated onAiStreamChunk for AI events
     const unsubStream = onAiStreamChunk((chunk: AiStreamChunk) => {
       if (!mountedRef.current) {return;}
+      const activeStream = activeStreamRef.current;
+      if (activeStream && chunk.session_id && chunk.session_id !== activeStream.sessionId) {
+        return;
+      }
+      if (activeStream) {
+        activeStream.receivedChunk = true;
+      }
       lastChunkTimeRef.current = Date.now();
       setStreamError(null);
       handleStreamChunk(chunk);
+      if (chunk.type === 'done' || chunk.type === 'error') {
+        activeStreamRef.current = null;
+      }
     });
 
     // Use onSidecarEvent only for non-AI events (e.g., sidecar lifecycle)
@@ -462,7 +481,14 @@ export default function AIPage() {
       if (!mountedRef.current) {return;}
       const elapsed = Date.now() - lastChunkTimeRef.current;
       if (elapsed > STREAM_TIMEOUT_MS) {
+        const activeStream = activeStreamRef.current;
+        if (activeStream && !activeStream.receivedChunk && !activeStream.fallbackStarted) {
+          void runNonStreamingFallback(activeStream, t('ai.stream_error'));
+          return;
+        }
+
         console.warn('AI stream timed out after 30s of inactivity');
+        activeStreamRef.current = null;
         setIsStreaming(false);
         setStreamError(t('ai.stream_error'));
         // Mark last message as not streaming
@@ -489,7 +515,20 @@ export default function AIPage() {
 
   async function checkAiStatus() {
     try {
-      const result = await callCapability('ai.check_connectivity', { force: true }) as { connected?: boolean; reason?: string };
+      const keyResult = await callCapability('api_key.status', {}) as {
+        success?: boolean;
+        data?: { configured?: boolean };
+        configured?: boolean;
+      };
+      const keyStatus = keyResult.data || keyResult;
+      if (!keyStatus.configured) {
+        setAiStatus('no_key');
+        return;
+      }
+
+      setAiStatus('ready');
+
+      const result = await callCapability('ai.check_connectivity', { force: false }) as { connected?: boolean; reason?: string };
       if (result.connected) {
         setAiStatus('ready');
       } else if (result.reason?.includes('not initialized')) {
@@ -498,7 +537,7 @@ export default function AIPage() {
         setAiStatus('offline');
       }
     } catch {
-      setAiStatus('no_key');
+      setAiStatus('offline');
     }
   }
 
@@ -527,6 +566,69 @@ export default function AIPage() {
     }
   }, [flushPendingChunks]);
 
+  async function runNonStreamingFallback(activeStream: ActiveStreamRequest, reason: string) {
+    if (activeStream.fallbackStarted) {return;}
+    activeStream.fallbackStarted = true;
+
+    try {
+      await callCapability('ai.cancel_stream', { session_id: activeStream.sessionId });
+    } catch {
+      // Best-effort cancellation before falling back to non-streaming chat.
+    }
+
+    try {
+      const result = await callCapability('ai.chat', {
+        message: activeStream.message,
+        session_id: activeStream.sessionId,
+        fast: true,
+        mode: activeStream.mode,
+      }) as { text?: string; error?: string };
+
+      setMessages((prev) => {
+        const updated = [...prev];
+        const streamingAssistant = [...updated]
+          .reverse()
+          .find((msg) => msg.role === 'assistant' && msg.isStreaming);
+        const fallbackText = result.text?.trim();
+        const content = fallbackText || `${t('ai.error_prefix')}: ${result.error || reason}`;
+
+        if (streamingAssistant) {
+          streamingAssistant.isStreaming = false;
+          streamingAssistant.timestamp = Date.now();
+          streamingAssistant.content = content;
+        } else {
+          updated.push({
+            id: `ai_fallback_${Date.now()}`,
+            role: result.error ? 'system' : 'assistant',
+            content,
+            timestamp: Date.now(),
+          });
+        }
+        return updated;
+      });
+
+      setStreamError(null);
+      loadActionLogs();
+      loadContext();
+    } catch (err) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `fallback_err_${Date.now()}`,
+          role: 'system',
+          content: `${t('ai.request_failed')}: ${err instanceof Error ? err.message : String(err)}`,
+          timestamp: Date.now(),
+        },
+      ]);
+      setStreamError(reason);
+    } finally {
+      if (activeStreamRef.current?.sessionId === activeStream.sessionId) {
+        activeStreamRef.current = null;
+      }
+      setIsStreaming(false);
+    }
+  }
+
   // ── Send Message ─────────────────────────────────────────────
 
   async function handleSend() {
@@ -550,6 +652,13 @@ export default function AIPage() {
     setIsStreaming(true);
     setStreamError(null);
     lastChunkTimeRef.current = Date.now();
+    activeStreamRef.current = {
+      sessionId,
+      message: userMsg,
+      mode: agentMode,
+      receivedChunk: false,
+      fallbackStarted: false,
+    };
 
     try {
       const result = await callCapability('ai.stream', {
@@ -562,6 +671,7 @@ export default function AIPage() {
         setCurrentSessionId(result.session_id);
       }
       if (result.error) {
+        activeStreamRef.current = null;
         setMessages((prev) => [
           ...prev,
           {
@@ -571,8 +681,17 @@ export default function AIPage() {
             timestamp: Date.now(),
           },
         ]);
+        setIsStreaming(false);
+      } else if (!result.streaming) {
+        const activeStream = activeStreamRef.current;
+        if (activeStream) {
+          void runNonStreamingFallback(activeStream, t('ai.stream_error'));
+        } else {
+          setIsStreaming(false);
+        }
       }
     } catch (err) {
+      activeStreamRef.current = null;
       setMessages((prev) => [
         ...prev,
         {
@@ -594,6 +713,7 @@ export default function AIPage() {
     } catch {
       // Best-effort cancellation
     }
+    activeStreamRef.current = null;
     setIsStreaming(false);
     setMessages((prev) => {
       const updated = [...prev];

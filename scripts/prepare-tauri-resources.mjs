@@ -22,7 +22,7 @@ fs.rmSync(resourcesDir, { recursive: true, force: true });
 fs.mkdirSync(resourcesDir, { recursive: true });
 
 copyRequired(process.execPath, path.join(resourcesDir, 'node', process.platform === 'win32' ? 'node.exe' : 'node'));
-copyRequired(path.join(repoRoot, 'runtime', 'dist'), path.join(resourcesDir, 'runtime', 'dist'));
+copyRequired(path.join(repoRoot, 'packages', 'evolveflow-runtime', 'dist'), path.join(resourcesDir, 'runtime', 'dist'));
 
 copyPackage('storage', path.join(repoRoot, 'packages', 'evolveflow-storage'));
 copyPackage('domain', path.join(repoRoot, 'packages', 'evolveflow-domain'));

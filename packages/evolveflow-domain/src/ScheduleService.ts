@@ -202,6 +202,13 @@ export class ScheduleService {
   private taskService: TaskService;
   private eventService: EventService;
   private preferenceService: PreferenceService;
+  /**
+   * Request-scoped cache of bound events keyed by task id, built once at the
+   * start of a planning pass to avoid the N+1 of findBoundEvent() calling
+   * eventService.list() for every event_bound task × every slot. Null outside
+   * of a planning pass.
+   */
+  private boundEventCache: Map<string, Event> | null = null;
 
   constructor(
     db: Database.Database,
@@ -408,141 +415,160 @@ export class ScheduleService {
     const logger = new PerformanceLogger(`planDayOptimized(${date})`, 100);
     logger.start();
 
-    const planTransaction = this.db.transaction(() => {
-      this.clearDaySchedule(date);
+    // Populate the request-scoped bound-event cache so findBoundEvent() below
+    // does not issue a full eventService.list() per event_bound task per slot.
+    // Cleared in the finally block after the planning transaction completes.
+    this.boundEventCache = new Map();
 
-      // ── 1. Gather preserved blocks and events ──
-      const preservedBlocks = this.getPreservedBlocks(date);
-      const events = this.eventService.list({
-        start: `${date}T00:00:00`,
-        end: `${date}T23:59:59`,
-      });
-      const eventBlocks = this.createEventBlocks(events, date, preservedBlocks);
+    try {
+      const planTransaction = this.db.transaction(() => {
+        this.clearDaySchedule(date);
 
-      // Build initial occupied slots from locked/manual blocks + events.
-      const occupiedSlots = this.computeOccupiedSlots(date, [...preservedBlocks, ...eventBlocks]);
-
-      // ── 2. Compute available slots ──
-      const availableSlots = this.getAvailableSlots(date, occupiedSlots);
-
-      // ── 3. Load tasks and compute priority scores ──
-      const allTasks = this.taskService.list({ status: 'pending' });
-      const schedulableTasks = allTasks.filter((t) => {
-        if (t.locked) {
-          return false;
-        }
-        if (t.parent_task_id) {
-          const subTasks = this.taskService.getSubTasks(t.parent_task_id);
-          if (subTasks.length > 0) {
-            return false;
+        // ── 1. Gather preserved blocks and events ──
+        const preservedBlocks = this.getPreservedBlocks(date);
+        const events = this.eventService.list({
+          start: `${date}T00:00:00`,
+          end: `${date}T23:59:59`,
+        });
+        // Index bound events once: bound_task_id → event.
+        for (const ev of events) {
+          if (ev.bound_task_id) {
+            this.boundEventCache!.set(ev.bound_task_id, ev);
           }
         }
-        return true;
-      });
+        const eventBlocks = this.createEventBlocks(events, date, preservedBlocks);
 
-      // Preload completion rates once for all tasks.
-      const completionRates = this.loadProjectCompletionRates();
+        // Build initial occupied slots from locked/manual blocks + events.
+        const occupiedSlots = this.computeOccupiedSlots(date, [...preservedBlocks, ...eventBlocks]);
 
-      const scoredTasks: TaskPriority[] = schedulableTasks.map((t) => {
-        const breakdown = this.computePriorityBreakdown(t, date, completionRates);
-        return {
-          task: t,
-          priorityScore:
-            breakdown.base + breakdown.urgency + breakdown.dependency + breakdown.completionHistory,
-          breakdown,
-        };
-      });
+        // ── 2. Compute available slots ──
+        const availableSlots = this.getAvailableSlots(date, occupiedSlots);
 
-      // Sort descending by priority score, with stable tiebreaker.
-      scoredTasks.sort((a, b) => {
-        const scoreDiff = b.priorityScore - a.priorityScore;
-        if (scoreDiff !== 0) {
-          return scoreDiff;
-        }
-        return a.task.created_at.localeCompare(b.task.created_at);
-      });
+        // ── 3. Load tasks and compute priority scores ──
+        const allTasks = this.taskService.list({ status: 'pending' });
+        const schedulableTasks = allTasks.filter((t) => {
+          if (t.locked) {
+            return false;
+          }
+          if (t.parent_task_id) {
+            const subTasks = this.taskService.getSubTasks(t.parent_task_id);
+            if (subTasks.length > 0) {
+              return false;
+            }
+          }
+          return true;
+        });
 
-      // ── 4. Resolve preferences with fallbacks ──
-      const bufferMinutes = preferences?.bufferMinutes ?? this.getBufferPreference() ?? 5;
-      const preferMorning = preferences?.preferMorningForDeadlineTasks ?? true;
-      const respectEnergy = preferences?.respectEnergyPatterns ?? true;
+        // Preload completion rates once for all tasks.
+        const completionRates = this.loadProjectCompletionRates();
 
-      let energyPatterns: EnergyPatterns | null = null;
-      if (respectEnergy) {
-        energyPatterns = this.loadEnergyPatterns();
-      }
-
-      // ── 5. Main scheduling pass (weighted slot scoring) ──
-      const scheduled: ScheduleBlock[] = [...preservedBlocks, ...eventBlocks];
-      const deferred: DeferredTask[] = [];
-      const now = new Date().toISOString();
-
-      for (const { task, priorityScore } of scoredTasks) {
-        if (!task.duration_minutes || task.duration_minutes <= 0) {
-          deferred.push({
-            taskId: task.id,
-            reason: 'no_duration',
-            suggestedDate: date,
-          });
-          continue;
-        }
-
-        const bestSlot = this.selectBestSlot(
-          task,
-          availableSlots,
-          date,
-          bufferMinutes,
-          preferMorning,
-          energyPatterns,
-          priorityScore
-        );
-
-        if (bestSlot) {
-          const block: ScheduleBlock = {
-            id: uuidv4(),
-            task_id: task.id,
-            event_id: null,
-            date,
-            start_time: bestSlot.start,
-            end_time: this.addMinutes(bestSlot.start, task.duration_minutes),
-            locked: false,
-            manual_signal: false,
-            created_at: now,
-            updated_at: now,
+        const scoredTasks: TaskPriority[] = schedulableTasks.map((t) => {
+          const breakdown = this.computePriorityBreakdown(t, date, completionRates);
+          return {
+            task: t,
+            priorityScore:
+              breakdown.base +
+              breakdown.urgency +
+              breakdown.dependency +
+              breakdown.completionHistory,
+            breakdown,
           };
-          this.persistBlock(block);
-          scheduled.push(block);
+        });
 
-          // Trim the slot and insert buffer.
-          this.trimSlot(availableSlots, bestSlot, bufferMinutes);
-        } else {
-          const nextDay = this.getNextDateString(date);
-          deferred.push({
-            taskId: task.id,
-            reason: 'no_fit',
-            suggestedDate: nextDay,
-          });
+        // Sort descending by priority score, with stable tiebreaker.
+        scoredTasks.sort((a, b) => {
+          const scoreDiff = b.priorityScore - a.priorityScore;
+          if (scoreDiff !== 0) {
+            return scoreDiff;
+          }
+          return a.task.created_at.localeCompare(b.task.created_at);
+        });
+
+        // ── 4. Resolve preferences with fallbacks ──
+        const bufferMinutes = preferences?.bufferMinutes ?? this.getBufferPreference() ?? 5;
+        const preferMorning = preferences?.preferMorningForDeadlineTasks ?? true;
+        const respectEnergy = preferences?.respectEnergyPatterns ?? true;
+
+        let energyPatterns: EnergyPatterns | null = null;
+        if (respectEnergy) {
+          energyPatterns = this.loadEnergyPatterns();
         }
-      }
 
-      // ── 6. Gap-filling pass ──
-      // Collect gaps (available slots) that are >= 15 minutes.
-      const gapFillResults = this.gapFillingPass(availableSlots, deferred, date, now);
-      for (const result of gapFillResults) {
-        scheduled.push(result);
-        // Remove the task from deferred.
-        const idx = deferred.findIndex((d) => d.taskId === result.task_id);
-        if (idx >= 0) {
-          deferred.splice(idx, 1);
+        // ── 5. Main scheduling pass (weighted slot scoring) ──
+        const scheduled: ScheduleBlock[] = [...preservedBlocks, ...eventBlocks];
+        const deferred: DeferredTask[] = [];
+        const now = new Date().toISOString();
+
+        for (const { task, priorityScore } of scoredTasks) {
+          if (!task.duration_minutes || task.duration_minutes <= 0) {
+            deferred.push({
+              taskId: task.id,
+              reason: 'no_duration',
+              suggestedDate: date,
+            });
+            continue;
+          }
+
+          const bestSlot = this.selectBestSlot(
+            task,
+            availableSlots,
+            date,
+            bufferMinutes,
+            preferMorning,
+            energyPatterns,
+            priorityScore
+          );
+
+          if (bestSlot) {
+            const block: ScheduleBlock = {
+              id: uuidv4(),
+              task_id: task.id,
+              event_id: null,
+              date,
+              start_time: bestSlot.start,
+              end_time: this.addMinutes(bestSlot.start, task.duration_minutes),
+              locked: false,
+              manual_signal: false,
+              created_at: now,
+              updated_at: now,
+            };
+            this.persistBlock(block);
+            scheduled.push(block);
+
+            // Trim the slot and insert buffer.
+            this.trimSlot(availableSlots, bestSlot, bufferMinutes);
+          } else {
+            const nextDay = this.getNextDateString(date);
+            deferred.push({
+              taskId: task.id,
+              reason: 'no_fit',
+              suggestedDate: nextDay,
+            });
+          }
         }
-      }
 
-      return { scheduled, deferred };
-    });
+        // ── 6. Gap-filling pass ──
+        // Collect gaps (available slots) that are >= 15 minutes.
+        const gapFillResults = this.gapFillingPass(availableSlots, deferred, date, now);
+        for (const result of gapFillResults) {
+          scheduled.push(result);
+          // Remove the task from deferred.
+          const idx = deferred.findIndex((d) => d.taskId === result.task_id);
+          if (idx >= 0) {
+            deferred.splice(idx, 1);
+          }
+        }
 
-    const result = planTransaction();
-    logger.stop();
-    return result;
+        return { scheduled, deferred };
+      });
+
+      const result = planTransaction();
+      logger.stop();
+      return result;
+    } finally {
+      // Release the request-scoped cache; subsequent calls re-populate it.
+      this.boundEventCache = null;
+    }
   }
 
   /**
@@ -1616,6 +1642,12 @@ export class ScheduleService {
   private findBoundEvent(task: Task): Event | null {
     if (!task.id) {
       return null;
+    }
+    // Fast path: during a planning pass the bound-event index is precomputed
+    // once, avoiding an eventService.list() call (full table scan) for every
+    // event_bound task on every candidate slot.
+    if (this.boundEventCache) {
+      return this.boundEventCache.get(task.id) ?? null;
     }
     const events = this.eventService.list();
     return events.find((e) => e.bound_task_id === task.id) ?? null;

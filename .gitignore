@@ -20,3 +20,14 @@ Thumbs.db
 *.exe
 *.pdb
 *.d
+
+# ZCode/skills tooling (per-user, not source)
+.agents/
+skills-lock.json
+
+# Local scratch / temp working dirs
+tmp/
+tools/
+
+# Stray files from shell `2>nul` redirects on Windows
+nul
