@@ -66,9 +66,17 @@ rm -rf /tmp/pi
 
 ### 步骤 3：sidecar 接入 pi SDK（最小对话）
 
-- 在 sidecar.ts 用 createAgentSession + bridge + pi-ai DeepSeek provider
-- 跑通最小路径：前端发消息 → pi agent 响应 → 能调 task.create
-- 验证：手测 AI 页发"帮我建个任务"，任务真被创建
+### 步骤 3：sidecar 接入 pi SDK（最小对话）⚠️ 部分完成
+
+- ✅ 新建 packages/evolveflow-runtime/src/pi-engine.ts：封装 runAgentLoop + 桥接 + DeepSeek
+- ✅ pi-ai 能解析 DeepSeek 模型（deepseek-v4-pro，openai-completions api）
+- ✅ build 通过、类型正确、API key 能传入
+- ✅ 真实 DeepSeek API 调用通（smoke test 验证请求到达）
+- ❌ **未完成**：runAgentLoop 返回的 assistant 内容为空——低层 loop 需要更多接线
+  （streamFn 返回值消费、eventSink 聚合、工具执行闭环）。应改用 pi 的 AgentHarness
+  高层封装，或正确接线 stream/event。
+- 验证：build 通过 + smoke test 请求到达 DeepSeek（但响应内容未正确捕获）
+- **下次 session 首要任务**：研究 agent-harness.ts，用高层封装重写 pi-engine.run()
 
 ### 步骤 4：删自研循环，迁移测试
 

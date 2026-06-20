@@ -17,7 +17,10 @@
   "dependencies": {
     "@evolveflow/capabilities": "^0.1.0",
     "@evolveflow/domain": "^0.1.0",
+    "@evolveflow/pi-bridge": "^0.1.0",
     "@evolveflow/storage": "^0.1.0",
+    "@evolveflow/vendor-pi-agent": "^0.79.8",
+    "@evolveflow/vendor-pi-ai": "^0.79.8",
     "@sentry/node": "^8.0.0"
   },
   "devDependencies": {
