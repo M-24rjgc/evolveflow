@@ -1,0 +1,22 @@
+{
+  "name": "@evolveflow/pi-bridge",
+  "version": "0.1.0",
+  "description": "Bridge that exposes EvolveFlow's CapabilityRegistry as pi AgentTools",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest --run",
+    "lint": "eslint src --ext .ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@evolveflow/capabilities": "^0.1.0",
+    "@evolveflow/vendor-pi-agent": "^0.79.8"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0"
+  }
+}
