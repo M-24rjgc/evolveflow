@@ -1,0 +1,9 @@
+# Vendored third-party code — not subject to EvolveFlow formatting rules
+packages/evolveflow-vendor-pi-agent
+packages/evolveflow-vendor-pi-ai
+
+# Generated files
+dist
+node_modules
+coverage
+apps/desktop-tauri/src-tauri/gen

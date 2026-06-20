@@ -18,7 +18,9 @@
     "target",
     "apps/desktop-tauri/src-tauri/gen",
     "*.js",
-    "*.d.ts"
+    "*.d.ts",
+    "packages/evolveflow-vendor-pi-agent",
+    "packages/evolveflow-vendor-pi-ai"
   ],
   "rules": {
     "@typescript-eslint/no-unused-vars": [
