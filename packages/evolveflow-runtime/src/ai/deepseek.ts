@@ -1,36 +1,14 @@
-export const DEEPSEEK_PROVIDER = 'DeepSeek';
-export const DEEPSEEK_MODEL = 'deepseek-v4-flash';
-export const DEEPSEEK_MODEL_DISPLAY = 'DeepSeek-V4-Flash';
-export const DEEPSEEK_ANTHROPIC_BASE_URL = 'https://api.deepseek.com/anthropic';
+/**
+ * EvolveFlow AI 常量（精简版）。
+ *
+ * 旧的 DeepSeek Anthropic 端点常量（DEEPSEEK_ANTHROPIC_BASE_URL 等）随旧 ApiClient 删除。
+ * pi 路径用 DeepSeek 的 OpenAI 兼容端点（model id 'deepseek-v4-pro'，见 sidecar-pi-bridge）。
+ * 这里只保留 AgentMode 类型和 API key 解析（其他模块仍用）。
+ */
 
 export type AgentMode = 'chat' | 'plan' | 'auto' | 'yolo';
 
-export interface DeepSeekRuntimeConfig {
-  provider: typeof DEEPSEEK_PROVIDER;
-  model: typeof DEEPSEEK_MODEL;
-  modelDisplay: typeof DEEPSEEK_MODEL_DISPLAY;
-  baseUrl: typeof DEEPSEEK_ANTHROPIC_BASE_URL;
-}
-
-export function getDeepSeekRuntimeConfig(): DeepSeekRuntimeConfig {
-  return {
-    provider: DEEPSEEK_PROVIDER,
-    model: DEEPSEEK_MODEL,
-    modelDisplay: DEEPSEEK_MODEL_DISPLAY,
-    baseUrl: DEEPSEEK_ANTHROPIC_BASE_URL,
-  };
-}
-
+/** 从环境变量取 DeepSeek API key（兼容 EVOLVEFLOW_AI_KEY / DEEPSEEK_API_KEY）。 */
 export function getEnvDeepSeekApiKey(env: NodeJS.ProcessEnv = process.env): string {
   return env.EVOLVEFLOW_AI_KEY || env.DEEPSEEK_API_KEY || '';
-}
-
-export function getThinkingForMode(
-  mode: AgentMode,
-  fast = false
-): { type: 'enabled' } | { type: 'disabled' } {
-  if (fast || mode === 'chat') {
-    return { type: 'disabled' };
-  }
-  return { type: 'enabled' };
 }

@@ -5,14 +5,11 @@ import { createRegistry } from '@evolveflow/capabilities';
 import * as path from 'path';
 import * as os from 'os';
 import * as readline from 'readline';
-import {
-  createCliAgent,
-  DEEPSEEK_ANTHROPIC_BASE_URL,
-  DEEPSEEK_MODEL,
-  DEEPSEEK_PROVIDER,
-  type AgentMode,
-  type ToolPermissionRequest,
-} from './agent.js';
+import { createCliAgent, type AgentMode } from './agent.js';
+
+const DEEPSEEK_PROVIDER = 'DeepSeek' as const;
+const DEEPSEEK_MODEL = 'deepseek-v4-pro' as const;
+const DEEPSEEK_BASE_URL = 'https://api.deepseek.com' as const;
 
 function getDataDir(): string {
   const base = path.join(os.homedir(), '.evolveflow', 'app-data');
@@ -80,7 +77,7 @@ function printAgentHeader(mode: AgentMode): void {
   console.log(`Provider: ${DEEPSEEK_PROVIDER}`);
   console.log(`Model: ${DEEPSEEK_MODEL}`);
   console.log(`Mode: ${formatMode(mode)}`);
-  console.log(`Base URL: ${DEEPSEEK_ANTHROPIC_BASE_URL}`);
+  console.log(`Base URL: ${DEEPSEEK_BASE_URL}`);
 }
 
 function formatMode(mode: AgentMode): string {
@@ -109,7 +106,7 @@ function printConnectHelp(): void {
       '  2. 终端环境变量: EVOLVEFLOW_AI_KEY 或 DEEPSEEK_API_KEY',
       `  固定 Provider: ${DEEPSEEK_PROVIDER}`,
       `  固定 Model: ${DEEPSEEK_MODEL}`,
-      `  固定 Base URL: ${DEEPSEEK_ANTHROPIC_BASE_URL}`,
+      `  固定 Base URL: ${DEEPSEEK_BASE_URL}`,
     ].join('\n')
   );
 }
@@ -142,7 +139,7 @@ async function runInteractive(initialMode: AgentMode): Promise<void> {
   const agent = createCliAgent();
   let mode = initialMode;
   let sessionId = `cli_${Date.now()}`;
-  let pendingPrompt = false;
+  const pendingPrompt = false;
 
   try {
     printAgentHeader(mode);
@@ -205,7 +202,7 @@ async function runInteractive(initialMode: AgentMode): Promise<void> {
             console.log(`Provider: ${DEEPSEEK_PROVIDER}`);
             console.log(`Model: ${DEEPSEEK_MODEL}`);
             console.log(`Mode: ${formatMode(mode)}`);
-            console.log(`Base URL: ${DEEPSEEK_ANTHROPIC_BASE_URL}`);
+            console.log(`Base URL: ${DEEPSEEK_BASE_URL}`);
             console.log(
               `API Key: ${agent.status.configured ? `${agent.status.keySource} (...${agent.status.keySuffix})` : 'not configured'}`
             );
@@ -240,21 +237,6 @@ async function runInteractive(initialMode: AgentMode): Promise<void> {
               mode,
               sessionId,
               stream: true,
-              confirmToolUse: async (request) => {
-                if (!request.mutating) {
-                  return true;
-                }
-                pendingPrompt = true;
-                try {
-                  const allowed = await askToolApproval(rl, request);
-                  return {
-                    allow: allowed,
-                    reason: allowed ? undefined : `用户拒绝执行工具: ${request.capabilityName}`,
-                  };
-                } finally {
-                  pendingPrompt = false;
-                }
-              },
               onChunk: (chunk) => {
                 if (chunk.type === 'text_delta' && chunk.content) {
                   process.stdout.write(chunk.content);
@@ -297,15 +279,6 @@ async function runInteractive(initialMode: AgentMode): Promise<void> {
   } finally {
     agent.close();
   }
-}
-
-function askToolApproval(rl: readline.Interface, request: ToolPermissionRequest): Promise<boolean> {
-  return new Promise((resolve) => {
-    const inputPreview = JSON.stringify(request.input).slice(0, 500);
-    rl.question(`允许执行写入工具 ${request.capabilityName}? ${inputPreview} [y/N] `, (answer) => {
-      resolve(answer.trim().toLowerCase() === 'y' || answer.trim().toLowerCase() === 'yes');
-    });
-  });
 }
 
 program

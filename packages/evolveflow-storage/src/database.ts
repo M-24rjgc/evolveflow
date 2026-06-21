@@ -242,9 +242,11 @@ const MIGRATIONS: Array<{ version: number; sql: string }> = [
     // v3: add updated_at to dream_insights. UndoService.revertMemoryAction
     // updates rows with `updated_at = ?`, which previously failed with
     // "no column named updated_at" because the v2 table only had created_at.
+    // 注：SQLite 的 ALTER ADD COLUMN 不允许非常量默认值（datetime('now') 是函数），
+    // 用常量空串占位，新行由业务层填真实时间戳。
     version: 3,
     sql: `
-      ALTER TABLE dream_insights ADD COLUMN updated_at TEXT NOT NULL DEFAULT (datetime('now'));
+      ALTER TABLE dream_insights ADD COLUMN updated_at TEXT NOT NULL DEFAULT '';
     `,
   },
 ];

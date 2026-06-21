@@ -12,8 +12,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import type Database from 'better-sqlite3';
-import { ApiClient } from './ai/client.js';
-import type { MessageParam, SystemMessageParam } from './ai/types.js';
+// Dream 不再直接依赖 ApiClient——改用 AiCompleter 接口（pi-backed），解耦旧 AI 代码。
+import type { AiCompleter } from './ai/sidecar-pi-bridge.js';
 
 // ── Configuration ──────────────────────────────────────────────
 
@@ -228,7 +228,7 @@ export class DreamOrchestrator {
   private config: DreamConfig;
   private memoryDir: string;
   private db: Database.Database;
-  private apiClient: ApiClient;
+  private aiComplete: AiCompleter;
   private lastDreamTime: Date | null = null;
   private sessionCount: number = 0;
   private isRunning: boolean = false;
@@ -236,13 +236,13 @@ export class DreamOrchestrator {
   constructor(
     memoryDir: string,
     db: Database.Database,
-    apiClient: ApiClient,
+    aiComplete: AiCompleter,
     config?: Partial<DreamConfig>
   ) {
     this.config = { ...DEFAULT_CONFIG, ...config };
     this.memoryDir = memoryDir;
     this.db = db;
-    this.apiClient = apiClient;
+    this.aiComplete = aiComplete;
 
     if (!fs.existsSync(memoryDir)) {
       fs.mkdirSync(memoryDir, { recursive: true });
@@ -523,9 +523,7 @@ export class DreamOrchestrator {
     // Build the user message with structured data
     const dataStr = JSON.stringify(dreamData, null, 2);
 
-    const systemPrompt: SystemMessageParam[] = [{ type: 'text', text: DREAM_SYSTEM_PROMPT }];
-
-    const messages: MessageParam[] = [
+    const messages: Array<{ role: 'user' | 'assistant'; content: string }> = [
       {
         role: 'user',
         content: `以下是用户的完整数据分析数据，请分析并返回结构化JSON结果：
@@ -536,15 +534,14 @@ ${dataStr}
       },
     ];
 
-    // Call the fixed DeepSeek-V4-Flash model for background analysis.
-    const result = await this.apiClient.createMessage(messages, undefined, systemPrompt, {
+    // 经 pi-backed AiCompleter 做单次补全（低温度求稳定结构化输出）。
+    const { text } = await this.aiComplete(messages, DREAM_SYSTEM_PROMPT, {
       maxTokens: 4096,
-      temperature: 0.3, // Low temperature for consistent structured output
+      temperature: 0.3,
     });
 
-    // Extract text from response
-    const textBlock = result.response.content.find((block) => block.type === 'text');
-    if (!textBlock || textBlock.type !== 'text') {
+    // text 即 AI 返回的文本内容
+    if (!text || !text.trim()) {
       return {
         status: 'error',
         summary: 'AI返回了空响应或无文本内容',
@@ -554,7 +551,7 @@ ${dataStr}
       };
     }
 
-    const rawText = textBlock.text;
+    const rawText = text;
 
     // Parse the JSON from the AI response
     return this.parseAIResponse(rawText);

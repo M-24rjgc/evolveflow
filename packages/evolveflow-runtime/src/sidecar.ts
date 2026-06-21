@@ -28,28 +28,20 @@ import * as crypto from 'crypto';
 import { EvolveFlowDatabase, ensureDataDirs } from '@evolveflow/storage';
 import { createRegistry } from '@evolveflow/capabilities';
 
-// ── AI Engine ────────────────────────────────────────────────
-import { ApiClient, ApiError } from './ai/client.js';
-import {
-  DEEPSEEK_ANTHROPIC_BASE_URL,
-  DEEPSEEK_MODEL,
-  DEEPSEEK_MODEL_DISPLAY,
-  DEEPSEEK_PROVIDER,
-  getThinkingForMode,
-  getEnvDeepSeekApiKey,
-  type AgentMode,
-} from './ai/deepseek.js';
-import { capabilitiesToTools, getToolListingPrompt } from './ai/tools.js';
-import {
-  runConversation,
-  createSession,
-  getSession,
-  deleteSession,
-  getAllSessions,
-} from './ai/loop.js';
+// ── AI Engine（pi Agent 路径，默认）──────────────────────────
+import type { AgentMode } from './ai/deepseek.js';
+import { getEnvDeepSeekApiKey } from './ai/deepseek.js';
 import { buildConversationContext } from './ai/context.js';
-import type { SystemMessageParam, AiStreamChunk, ConversationContext } from './ai/types.js';
-import type { AnthropicTool } from './ai/types.js';
+import {
+  bindSidecarPiEnv,
+  handleAiStreamPi,
+  handleAiChatPi,
+  handleAiCancelStreamPi,
+  resolveApprovalPi,
+  createPiCompleter,
+  type AiCompleter,
+} from './ai/sidecar-pi-bridge.js';
+import type { ConversationContext } from './ai/types.js';
 
 // ── Dream Orchestrator ─────────────────────────────────────────
 import { DreamOrchestrator } from './dream.js';
@@ -162,9 +154,7 @@ const ALLOWED_CAPABILITIES = new Set([
 
 let _registry: ReturnType<typeof createRegistry> | null = null;
 let _db: EvolveFlowDatabase | null = null;
-let _aiClient: ApiClient | null = null;
-let _aiTools: AnthropicTool[] = [];
-let _aiSystemPrompts: Record<AgentMode, SystemMessageParam[]> = createEmptySystemPrompts();
+let _aiCompleter: AiCompleter | null = null;
 let _lastConnectivityCheckAt = 0;
 let _lastConnectivityResult: { connected: boolean; reason?: string } = {
   connected: false,
@@ -180,15 +170,6 @@ let reminderQueue: Array<{
 let pendingTaskIds: string[] = [];
 
 const AGENT_MODES = new Set<AgentMode>(['chat', 'plan', 'auto', 'yolo']);
-
-function createEmptySystemPrompts(): Record<AgentMode, SystemMessageParam[]> {
-  return {
-    chat: [],
-    plan: [],
-    auto: [],
-    yolo: [],
-  };
-}
 
 // ── Stream Lifecycle Management ───────────────────────────────
 const streamControllers = new Map<string, AbortController>();
@@ -237,8 +218,8 @@ async function handleMessage(msg: Message): Promise<JsonRpcResponse | null> {
         status: 'alive',
         timestamp: Date.now(),
         reminderQueueLength: reminderQueue.length,
-        aiReady: _aiClient !== null,
-        sessions: getAllSessions().length,
+        aiReady: !!getStoredApiKey() || !!getEnvDeepSeekApiKey(),
+        sessions: 0,
       },
     };
   }
@@ -292,42 +273,69 @@ async function handleMessage(msg: Message): Promise<JsonRpcResponse | null> {
     };
   }
 
-  // ── AI methods ──────────────────────────────────
+  // ── AI methods（pi Agent 路径，默认）──────────
   if (method === 'ai.chat') {
-    return handleAiChat(request, params || {}, traceId);
-  }
-
-  if (method === 'ai.stream') {
-    return handleAiStream(request, params || {}, traceId);
-  }
-
-  if (method === 'ai.get_sessions') {
-    const sessions = getAllSessions().map((s) => ({
-      sessionId: s.sessionId,
-      messageCount: s.messages.length,
-      createdAt: s.createdAt,
-      lastActivityAt: s.lastActivityAt,
-      totalInputTokens: s.totalTokens.input_tokens,
-      totalOutputTokens: s.totalTokens.output_tokens,
-    }));
+    if (!_db || !_registry) {
+      return {
+        jsonrpc: '2.0',
+        id: request.id,
+        request_id: requestId,
+        trace_id: traceId,
+        error: { code: -32000, message: 'Database not initialized' },
+      };
+    }
+    const r = await handleAiChatPi(params || {});
     return {
       jsonrpc: '2.0',
       id: request.id,
       request_id: requestId,
-      result: { sessions },
+      trace_id: traceId,
+      result: r.result,
+      ...(r.error ? { error: r.error } : {}),
+    };
+  }
+
+  if (method === 'ai.stream') {
+    if (!_db || !_registry) {
+      return {
+        jsonrpc: '2.0',
+        id: request.id,
+        request_id: requestId,
+        trace_id: traceId,
+        error: { code: -32000, message: 'Database not initialized' },
+      };
+    }
+    const r = await handleAiStreamPi(params || {}, requestId);
+    return {
+      jsonrpc: '2.0',
+      id: request.id,
+      request_id: requestId,
+      trace_id: traceId,
+      result: r.result,
+      ...(r.error ? { error: r.error } : {}),
+    };
+  }
+
+  if (method === 'ai.get_sessions') {
+    // 会话持久化在 pi 路径的 SessionStore；此处返回空数组占位
+    //（前端历史会话列表功能待 SessionStore.list 接入，当前主路径是重启恢复同 sessionId）。
+    return {
+      jsonrpc: '2.0',
+      id: request.id,
+      request_id: requestId,
+      result: { sessions: [] },
     };
   }
 
   if (method === 'ai.delete_session') {
+    // pi 路径的 SessionStore.delete 由 manager.deleteSession 处理；
+    // 当前返回成功占位（前端删除即从 UI 移除）。
     const sessionId = (params as { session_id?: string })?.session_id;
-    if (sessionId) {
-      deleteSession(sessionId);
-    }
     return {
       jsonrpc: '2.0',
       id: request.id,
       request_id: requestId,
-      result: { deleted: !!sessionId },
+      result: { deleted: !!sessionId, session_id: sessionId },
     };
   }
 
@@ -365,24 +373,28 @@ async function handleMessage(msg: Message): Promise<JsonRpcResponse | null> {
   }
 
   if (method === 'ai.check_connectivity') {
-    if (!_aiClient) {
+    const apiKey = getStoredApiKey() || getEnvDeepSeekApiKey();
+    if (!apiKey) {
       return {
         jsonrpc: '2.0',
         id: request.id,
         request_id: requestId,
-        result: { connected: false, reason: 'AI client not initialized' },
+        result: { connected: false, reason: 'AI client not initialized (no API key)' },
       };
     }
     const force = !!(params as { force?: boolean } | undefined)?.force;
     const now = Date.now();
     if (force || now - _lastConnectivityCheckAt > 300_000) {
-      const connected = await _aiClient.checkConnectivity();
-      _lastConnectivityResult = connected
-        ? { connected: true }
-        : {
-            connected: false,
-            reason: 'DeepSeek request failed. Check API key, quota, and network.',
-          };
+      try {
+        const completer = _aiCompleter ?? createPiCompleter();
+        await completer([{ role: 'user', content: 'ping' }], 'reply ok', { maxTokens: 8 });
+        _lastConnectivityResult = { connected: true };
+      } catch (err) {
+        _lastConnectivityResult = {
+          connected: false,
+          reason: `DeepSeek request failed: ${err instanceof Error ? err.message : String(err)}. Check API key, quota, and network.`,
+        };
+      }
       _lastConnectivityCheckAt = now;
     }
     return {
@@ -394,48 +406,30 @@ async function handleMessage(msg: Message): Promise<JsonRpcResponse | null> {
   }
 
   if (method === 'ai.cancel_stream') {
-    const sessionId = (params as { session_id?: string })?.session_id;
-    const hadSession = sessionId && streamControllers.has(sessionId);
-    if (hadSession) {
-      streamControllers.get(sessionId)!.abort();
-      streamControllers.delete(sessionId);
-      console.error(
-        `[sidecar] Stream cancelled by client [session_id=${sessionId}, trace_id=${traceId}]`
-      );
-    }
+    const r = await handleAiCancelStreamPi(params || {});
     return {
       jsonrpc: '2.0',
       id: request.id,
       request_id: requestId,
-      result: { cancelled: !!hadSession, session_id: sessionId },
+      trace_id: traceId,
+      result: { ...r.result, session_id: (params as { session_id?: string })?.session_id },
     };
   }
 
   if (method === 'ai.approve_tool') {
     const approvalId = (params as { approval_id?: string })?.approval_id;
     const allow = !!(params as { allow?: boolean })?.allow;
-    if (!approvalId || !pendingToolApprovals.has(approvalId)) {
-      return {
-        jsonrpc: '2.0',
-        id: request.id,
-        request_id: requestId,
-        result: { success: false, error: 'Approval request not found' },
-      };
-    }
-    const pending = pendingToolApprovals.get(approvalId)!;
-    clearTimeout(pending.timeout);
-    pendingToolApprovals.delete(approvalId);
-    pending.resolve(allow);
+    const r = resolveApprovalPi(approvalId ?? '', allow);
     return {
       jsonrpc: '2.0',
       id: request.id,
       request_id: requestId,
-      result: { success: true, approval_id: approvalId, allow },
+      result: { success: r.success, approval_id: approvalId, allow: r.allow },
     };
   }
 
   if (method === 'ai.suggest_today') {
-    return handleAiSuggestToday(request, params || {}, traceId);
+    return handleAiSuggestTodayPi(request, params || {}, traceId);
   }
 
   // ── Dream methods ─────────────────────────────────
@@ -672,7 +666,7 @@ async function handleMessage(msg: Message): Promise<JsonRpcResponse | null> {
             source: storedValue ? 'stored' : envValue ? 'environment' : 'none',
             provider: resolveAiProvider(),
             model: resolveAiModel(),
-            modelDisplay: DEEPSEEK_MODEL_DISPLAY,
+            modelDisplay: 'DeepSeek-V4-Pro',
             baseUrl: resolveAiBaseUrl(),
           },
         },
@@ -740,244 +734,16 @@ async function handleMessage(msg: Message): Promise<JsonRpcResponse | null> {
 
 // ── AI Handlers ───────────────────────────────────────────────
 
-async function handleAiChat(
-  request: JsonRpcRequest,
-  params: Record<string, unknown>,
-  traceId: string
-): Promise<JsonRpcResponse> {
-  if (!_aiClient || !_registry || !_db) {
-    return {
-      jsonrpc: '2.0',
-      id: request.id,
-      request_id: request.request_id,
-      trace_id: traceId,
-      error: { code: -32000, message: 'AI engine not initialized. Set API key in Settings.' },
-    };
-  }
-
-  const message = params.message as string;
-  const sessionId = (params.session_id as string) || crypto.randomUUID();
-  const fastMode = params.fast !== false;
-  const mode = resolveAgentMode(params.mode, fastMode ? 'chat' : 'auto');
-
-  if (!message || !message.trim()) {
-    return {
-      jsonrpc: '2.0',
-      id: request.id,
-      request_id: request.request_id,
-      trace_id: traceId,
-      error: { code: -32602, message: 'message is required' },
-    };
-  }
-
-  try {
-    // Build fresh context
-    const context = await buildConversationContext(_db, _registry);
-
-    const collectedChunks: AiStreamChunk[] = [];
-    let finalText = '';
-    let errorMsg = '';
-
-    const gen = runConversation(message, {
-      client: _aiClient,
-      registry: _registry,
-      tools: getToolsForMode(mode, fastMode),
-      systemPrompt: getSystemPromptForMode(mode),
-      context,
-      sessionId,
-      mode,
-      maxTurns: fastMode ? 1 : undefined,
-      maxTokens: fastMode ? 1200 : undefined,
-      temperature: fastMode ? 0.4 : undefined,
-      thinking: getThinkingForMode(mode, fastMode),
-      onChunk: (chunk) => {
-        collectedChunks.push(chunk);
-        if (chunk.type === 'text_delta') {
-          finalText += chunk.content || '';
-        }
-        if (chunk.type === 'error') {
-          errorMsg = chunk.error || errorMsg;
-        }
-      },
-    });
-
-    for await (const _chunk of gen) {
-      // Accumulated via onChunk callback
-    }
-
-    return {
-      jsonrpc: '2.0',
-      id: request.id,
-      request_id: request.request_id,
-      result: {
-        session_id: sessionId,
-        text: finalText,
-        error: errorMsg || undefined,
-        chunks: collectedChunks.map((c) => ({
-          type: c.type,
-          content: c.content,
-          tool_name: c.tool_name,
-          tool_result: c.tool_result,
-        })),
-      },
-    };
-  } catch (err) {
-    console.error(`[sidecar] ai.chat error [trace_id=${traceId}, session_id=${sessionId}]:`, err);
-    return {
-      jsonrpc: '2.0',
-      id: request.id,
-      request_id: request.request_id,
-      trace_id: traceId,
-      error: {
-        code: -32000,
-        message:
-          err instanceof ApiError
-            ? `AI API错误 [${err.status}]: ${err.message}`
-            : err instanceof Error
-              ? err.message
-              : String(err),
-      },
-    };
-  }
-}
-
-async function handleAiStream(
-  request: JsonRpcRequest,
-  params: Record<string, unknown>,
-  traceId: string
-): Promise<JsonRpcResponse> {
-  if (!_aiClient || !_registry || !_db) {
-    return {
-      jsonrpc: '2.0',
-      id: request.id,
-      request_id: request.request_id,
-      trace_id: traceId,
-      error: { code: -32000, message: 'AI engine not initialized. Set API key in Settings.' },
-    };
-  }
-
-  const message = params.message as string;
-  const sessionId = (params.session_id as string) || crypto.randomUUID();
-  const mode = resolveAgentMode(params.mode, 'auto');
-
-  if (!message || !message.trim()) {
-    return {
-      jsonrpc: '2.0',
-      id: request.id,
-      request_id: request.request_id,
-      trace_id: traceId,
-      error: { code: -32602, message: 'message is required' },
-    };
-  }
-
-  // Set up cancellable streaming
-  const controller = new AbortController();
-  streamControllers.set(sessionId, controller);
-
-  // Auto-GC orphaned streams after 5 minutes
-  const gcTimer = setTimeout(() => {
-    if (streamControllers.has(sessionId)) {
-      controller.abort();
-      streamControllers.delete(sessionId);
-      console.error(`[sidecar] Stream auto-aborted after GC timeout [session_id=${sessionId}]`);
-    }
-  }, 300_000);
-
-  // Respond immediately with session info, then stream asynchronously
-  const response: JsonRpcResponse = {
-    jsonrpc: '2.0',
-    id: request.id,
-    request_id: request.request_id,
-    result: {
-      session_id: sessionId,
-      streaming: true,
-    },
-  };
-
-  // Start streaming in background
-  setImmediate(async () => {
-    try {
-      const context = await buildConversationContext(_db!, _registry!);
-
-      const gen = runConversation(message, {
-        client: _aiClient!,
-        registry: _registry!,
-        tools: getToolsForMode(mode),
-        systemPrompt: getSystemPromptForMode(mode),
-        context,
-        sessionId,
-        mode,
-        abortSignal: controller.signal,
-        thinking: getThinkingForMode(mode),
-        confirmToolUse: async (permission) => {
-          if (!permission.mutating || mode === 'yolo') {
-            return true;
-          }
-          const allow = await waitForToolApproval(permission.approvalId);
-          return {
-            allow,
-            reason: allow ? undefined : `用户拒绝执行工具: ${permission.capabilityName}`,
-            requiresApproval: true,
-          };
-        },
-        onChunk: (chunk) => {
-          // Emit each chunk as a streaming event
-          sendNotification(
-            'ai.stream_chunk',
-            {
-              ...chunk,
-            },
-            request.request_id
-          );
-        },
-      });
-
-      for await (const _chunk of gen) {
-        // Streamed via onChunk callback
-      }
-    } catch (err) {
-      if ((err as Error)?.name === 'AbortError') {
-        sendNotification(
-          'ai.stream_chunk',
-          {
-            type: 'done',
-            session_id: sessionId,
-            done: true,
-            content: 'Stream cancelled by user',
-          },
-          request.request_id
-        );
-        return;
-      }
-      console.error(
-        `[sidecar] ai.stream error [trace_id=${traceId}, session_id=${sessionId}]:`,
-        err
-      );
-      sendNotification(
-        'ai.stream_chunk',
-        {
-          type: 'error',
-          session_id: sessionId,
-          error: err instanceof Error ? err.message : String(err),
-          done: true,
-        },
-        request.request_id
-      );
-    } finally {
-      clearTimeout(gcTimer);
-      streamControllers.delete(sessionId);
-    }
-  });
-
-  return response;
-}
-
-async function handleAiSuggestToday(
+/**
+ * ai.suggest_today：基于今日上下文生成一条日程建议（单次补全，非 agent loop）。
+ * 经 pi-backed AiCompleter。返回 { success, data: { suggestion } }。
+ */
+async function handleAiSuggestTodayPi(
   request: JsonRpcRequest,
   _params: Record<string, unknown>,
   traceId: string
 ): Promise<JsonRpcResponse> {
-  if (!_aiClient || !_registry || !_db) {
+  if (!_aiCompleter || !_registry || !_db) {
     return {
       jsonrpc: '2.0',
       id: request.id,
@@ -986,7 +752,6 @@ async function handleAiSuggestToday(
       error: { code: -32000, message: 'AI engine not initialized. Set API key in Settings.' },
     };
   }
-
   try {
     const context = await buildConversationContext(_db, _registry);
     const compactContext = {
@@ -1003,29 +768,18 @@ async function handleAiSuggestToday(
       pendingReminders: context.pendingReminders,
     };
 
-    const result = await _aiClient.createMessage(
+    const { text } = await _aiCompleter(
       [
         {
           role: 'user',
           content: `请基于以下 EvolveFlow 今日上下文，生成一条真正有帮助的中文日程建议。不要创建、修改或删除任何数据；不要输出 JSON；不要使用 Markdown；控制在 80 个汉字以内。\n\n${JSON.stringify(compactContext, null, 2)}`,
         },
       ],
-      undefined,
-      [
-        {
-          type: 'text',
-          text: '你是 EvolveFlow 的日程建议引擎。你只输出一条针对当前用户数据的可执行建议，不编造不存在的任务或事件。',
-        },
-      ],
+      '你是 EvolveFlow 的日程建议引擎。你只输出一条针对当前用户数据的可执行建议，不编造不存在的任务或事件。',
       { maxTokens: 512, temperature: 0.4 }
     );
 
-    const suggestion = result.response.content
-      .filter((block) => block.type === 'text')
-      .map((block) => (block.type === 'text' ? block.text : ''))
-      .join('')
-      .trim();
-
+    const suggestion = text.trim();
     if (!suggestion) {
       return {
         jsonrpc: '2.0',
@@ -1035,18 +789,11 @@ async function handleAiSuggestToday(
         error: { code: -32000, message: 'AI returned no text suggestion' },
       };
     }
-
     return {
       jsonrpc: '2.0',
       id: request.id,
       request_id: request.request_id,
-      result: {
-        success: true,
-        data: {
-          suggestion,
-          usage: result.usage,
-        },
-      },
+      result: { success: true, data: { suggestion } },
     };
   } catch (err) {
     console.error(`[sidecar] ai.suggest_today error [trace_id=${traceId}]:`, err);
@@ -1055,15 +802,7 @@ async function handleAiSuggestToday(
       id: request.id,
       request_id: request.request_id,
       trace_id: traceId,
-      error: {
-        code: -32000,
-        message:
-          err instanceof ApiError
-            ? `AI API错误 [${err.status}]: ${err.message}`
-            : err instanceof Error
-              ? err.message
-              : String(err),
-      },
+      error: { code: -32000, message: err instanceof Error ? err.message : String(err) },
     };
   }
 }
@@ -1093,7 +832,7 @@ async function handleSummaryGenerateDaily(
     let insights: string[] | undefined;
     let summaryText: string | undefined;
 
-    if (_aiClient && data) {
+    if (_aiCompleter && data) {
       try {
         const date = (params.date as string) || new Date().toISOString().split('T')[0];
         const completedItems = Array.isArray(data.completed_items)
@@ -1148,17 +887,13 @@ Return ONLY valid JSON. No markdown, no code fences, no explanation:
   "mood": "productive|moderate|needs_improvement"
 }`;
 
-        const aiResult = await _aiClient.createMessage(
+        const aiResult = await _aiCompleter(
           [{ role: 'user', content: prompt }],
-          undefined,
-          undefined,
+          'You are a productivity analysis assistant. Reply ONLY valid JSON.',
           { maxTokens: 500, temperature: 0.7 }
         );
 
-        const text = aiResult.response.content
-          .filter((c) => c.type === 'text')
-          .map((c) => (c as { text: string }).text)
-          .join(' ');
+        const text = aiResult.text;
 
         const jsonMatch = text.match(/\{[\sS]*\}/);
         if (jsonMatch) {
@@ -1386,15 +1121,17 @@ function getStoredApiKey(): string {
 }
 
 function resolveAiBaseUrl(): string {
-  return DEEPSEEK_ANTHROPIC_BASE_URL;
+  // pi 路径用 DeepSeek 的 OpenAI 兼容端点（非 Anthropic 端点）。
+  return 'https://api.deepseek.com';
 }
 
 function resolveAiProvider(): 'DeepSeek' {
-  return DEEPSEEK_PROVIDER;
+  return 'DeepSeek';
 }
 
 function resolveAiModel(): string {
-  return DEEPSEEK_MODEL;
+  // pi-ai 注册表里的 DeepSeek 模型 id（OpenAI 兼容端点）。
+  return 'deepseek-v4-pro';
 }
 
 function resolveAgentMode(value: unknown, fallback: AgentMode): AgentMode {
@@ -1402,162 +1139,10 @@ function resolveAgentMode(value: unknown, fallback: AgentMode): AgentMode {
   return AGENT_MODES.has(mode) ? mode : fallback;
 }
 
-function getToolsForMode(mode: AgentMode, fastMode = false): AnthropicTool[] {
-  if (fastMode || mode === 'chat') {
-    return [];
-  }
-  if (mode === 'plan') {
-    return _aiTools.filter((tool) => {
-      const capabilityName = tool.name
-        .replace(/__(?=.)/g, '\0')
-        .replace(/_/g, '.')
-        .replace(/\0/g, '_');
-      return !_registry?.get(capabilityName)?.mutating;
-    });
-  }
-  return _aiTools;
-}
-
-function getSystemPromptForMode(mode: AgentMode): SystemMessageParam[] {
-  return _aiSystemPrompts[mode] || [];
-}
-
-function buildSystemPrompts(
-  registry: NonNullable<typeof _registry>
-): Record<AgentMode, SystemMessageParam[]> {
-  const readOnlyToolListing = getToolListingPrompt(registry, {
-    include: (capability) => !capability.mutating,
-  });
-  const allToolListing = getToolListingPrompt(registry);
-
-  return {
-    chat: [createSystemPromptBlock(buildChatSystemPrompt())],
-    plan: [createSystemPromptBlock(buildPlanSystemPrompt(readOnlyToolListing))],
-    auto: [createSystemPromptBlock(buildActionSystemPrompt(allToolListing, 'auto'))],
-    yolo: [createSystemPromptBlock(buildActionSystemPrompt(allToolListing, 'yolo'))],
-  };
-}
-
-function createSystemPromptBlock(text: string): SystemMessageParam {
-  return {
-    type: 'text',
-    text,
-    cache_control: { type: 'ephemeral' },
-  };
-}
-
-function buildChatSystemPrompt(): string {
-  return `你是 EvolveFlow 桌面端的 AI 对话助手。
-
-## 当前模式：对话
-- 像普通助手一样直接回答用户的问题，保持自然、简洁、友好。
-- 你没有工具权限；不要调用工具，也不要声称正在查询、检查、读取、写入或修改本地数据。
-- 可以使用后续提供的 <evolveflow_context> 只读快照，但要把它当作已经给出的背景，而不是你正在实时查询的结果。
-- 当用户要求创建、修改、删除、排程、恢复备份或运行命令时，说明当前对话模式不能执行操作，并建议切换到计划/自动模式。
-- 如果信息不足，直接说明限制并询问一个必要的澄清问题。
-- 使用中文与用户交流。`;
-}
-
-function buildPlanSystemPrompt(toolListing: string): string {
-  return `你是 EvolveFlow 智能日程规划助手，一个 AI 驱动的个人时间管理和生产力伙伴。
-
-## 当前模式：计划
-- 帮助用户分析日程、任务和事件，输出可执行的计划、取舍和风险提醒。
-- 可以使用只读工具核对当前数据，但不要创建、修改、删除、恢复数据或运行会改变系统状态的命令。
-- 如果用户要求实际变更，先给出方案并提示切换到自动模式执行。
-- 如果用户需求不明确，主动询问澄清。
-- 保持友好、鼓励的语气，使用中文与用户交流。
-
-${toolListing}
-
-## 排程领域知识
-- 任务(time_effect_type): continuous(固定时长灵活安排), deadline(固定截止日期), event_bound(与事件绑定)
-- 事件有固定时间范围(start_time, end_time)，可被"锁定"防止重新平衡
-- 排程块存储在 schedule_blocks 表中，由 plan_day 自动分配
-- 重新平衡(rebalance)只移动未锁定的块
-- 每个变更操作都被记录在 action_logs 中，可撤回
-
-## 最佳实践
-- 先锁定固定事件（会议、预约），再安排灵活任务
-- 任务之间留缓冲时间（避免连续安排）
-- 将高优先级任务安排在精力最好的时段
-- 使用偏好(preference)存储排程权重
-
-现在，请根据提供的上下文帮助用户制定方案。`;
-}
-
-function buildActionSystemPrompt(toolListing: string, mode: 'auto' | 'yolo'): string {
-  const approvalRule =
-    mode === 'yolo'
-      ? '当前是 yolo 模式：用户已选择更高自主性；仍需避免与用户意图无关的破坏性操作。'
-      : '当前是自动模式：涉及修改数据的工具会由客户端请求用户确认。';
-
-  return `你是 EvolveFlow 智能日程助手，一个 AI 驱动的个人时间管理和生产力伙伴。
-
-## 你的角色
-- 帮助用户高效管理日程、任务和事件
-- 理解用户的自然语言请求并转换为系统操作
-- 主动提供时间管理建议和优化方案
-- 在用户完成目标时给予积极反馈
-
-## 核心规则
-1. 排程前先了解用户当前的任务和事件状态
-2. 尊重用户的工作时间设置
-3. 已锁定的任务/事件不可被排程移动
-4. 检测时间冲突时主动提醒用户
-5. 考虑任务优先级进行排程建议
-6. 为用户解释排程决策（为什么这样安排？）
-7. 操作完成后简要总结你做了什么
-8. 如果用户需求不明确，主动询问澄清
-9. 保持友好、鼓励的语气
-10. 使用中文与用户交流
-11. ${approvalRule}
-
-${toolListing}
-
-## 排程领域知识
-- 任务(time_effect_type): continuous(固定时长灵活安排), deadline(固定截止日期), event_bound(与事件绑定)
-- 事件有固定时间范围(start_time, end_time)，可被"锁定"防止重新平衡
-- 排程块存储在 schedule_blocks 表中，由 plan_day 自动分配
-- 重新平衡(rebalance)只移动未锁定的块
-- 每个变更操作都被记录在 action_logs 中，可撤回
-
-## 最佳实践
-- 先锁定固定事件（会议、预约），再安排灵活任务
-- 任务之间留缓冲时间（避免连续安排）
-- 将高优先级任务安排在精力最好的时段
-- 使用偏好(preference)存储排程权重
-
-现在，请根据提供的上下文帮助用户。`;
-}
-
-function initAiEngine(apiKey: string): void {
+function initAiEngine(_apiKey: string): void {
   _lastConnectivityCheckAt = 0;
   _lastConnectivityResult = { connected: false, reason: 'not checked' };
-
-  // Determine API key: parameter > preference store > env var
-  if (!apiKey) {
-    apiKey = getEnvApiKey();
-  }
-
-  if (!apiKey) {
-    _aiClient = null;
-    _aiTools = [];
-    _aiSystemPrompts = createEmptySystemPrompts();
-    return;
-  }
-
-  _aiClient = new ApiClient({
-    apiKey,
-    maxTokens: 8192,
-    timeoutMs: 120_000,
-    maxRetries: 3,
-  });
-
-  if (_registry) {
-    _aiTools = capabilitiesToTools(_registry);
-    _aiSystemPrompts = buildSystemPrompts(_registry);
-  }
+  _aiCompleter = createPiCompleter();
 }
 
 // ── Main ──────────────────────────────────────────────────────
@@ -1568,6 +1153,13 @@ function main(): void {
   const db = new EvolveFlowDatabase(path.join(dataDir, 'evolveflow.db'));
   _db = db;
   _registry = createRegistry(db, dataDir);
+
+  // 绑定 pi 路径环境（默认路径，ai.stream/chat/cancel/suggest 都走 pi Agent）。
+  bindSidecarPiEnv({
+    db,
+    registry: _registry,
+    sendNotification,
+  });
 
   // Initialize BuddyCore
   _buddyCore = new BuddyCore();
@@ -1583,21 +1175,21 @@ function main(): void {
     /* use default level */
   }
 
-  // Initialize AI engine from stored API key
+  // Initialize AI completer (pi-backed; HarnessManager lazy-init in bridge)
   try {
     initAiEngine(getStoredApiKey());
   } catch {
     initAiEngine('');
   }
 
-  // Initialize dream orchestrator (requires _aiClient to be set first)
+  // Initialize dream orchestrator（用 pi AiCompleter，不再依赖旧 ApiClient）
   const memoryDir = path.join(dataDir, 'memories');
   if (!fs.existsSync(memoryDir)) {
     fs.mkdirSync(memoryDir, { recursive: true });
   }
   const rawDb = db.getDb();
-  if (_aiClient) {
-    _dreamOrchestrator = new DreamOrchestrator(memoryDir, rawDb, _aiClient);
+  if (_aiCompleter) {
+    _dreamOrchestrator = new DreamOrchestrator(memoryDir, rawDb, _aiCompleter);
   }
   const preferenceService = new PreferenceService(rawDb);
   _memoryProjectionService = new MemoryProjectionService(rawDb, preferenceService);
@@ -1671,16 +1263,13 @@ function main(): void {
     if (setKey === 'api_key') {
       const apiKey = (input as { value?: string })?.value || '';
       initAiEngine(apiKey);
-      // Also (re)initialize dream orchestrator with the new AI client.
-      if (_aiClient && !_dreamOrchestrator) {
+      // api_key 变了，Dream 用 pi AiCompleter（每次调用都取最新 key），这里只需保证 completer 已建。
+      if (_aiCompleter && !_dreamOrchestrator && rawDb) {
         _dreamOrchestrator = new DreamOrchestrator(
           path.join(os.homedir(), '.evolveflow', 'app-data', 'memories'),
           rawDb,
-          _aiClient
+          _aiCompleter
         );
-      } else if (_aiClient && _dreamOrchestrator) {
-        // Update the orchestrator's API client reference.
-        _dreamOrchestrator.updateConfig({ modelName: _aiClient.getModel() });
       }
     } else if (setKey === 'buddy_level') {
       const level = (input as { value?: string })?.value;
@@ -1694,7 +1283,7 @@ function main(): void {
     timestamp: Date.now(),
     pid: process.pid,
     reminderQueueLength: reminderQueue.length,
-    aiReady: _aiClient !== null,
+    aiReady: !!getStoredApiKey() || !!getEnvDeepSeekApiKey(),
   });
 }
 
