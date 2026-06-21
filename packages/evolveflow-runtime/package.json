@@ -22,7 +22,7 @@
     "@evolveflow/storage": "^0.1.0",
     "@evolveflow/vendor-pi-agent": "^0.79.8",
     "@evolveflow/vendor-pi-ai": "^0.79.8",
-    "@sentry/node": "^8.0.0",
+    "@sentry/node": "^10.59.0",
     "pdfjs-dist": "^3.11.174"
   },
   "devDependencies": {
