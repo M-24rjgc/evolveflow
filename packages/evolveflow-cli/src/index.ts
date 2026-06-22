@@ -244,9 +244,7 @@ async function runInteractive(initialMode: AgentMode): Promise<void> {
                 } else if (chunk.type === 'tool_use_start') {
                   process.stdout.write(`\n[tool] ${chunk.tool_name}\n`);
                 } else if (chunk.type === 'tool_permission_request' && mode === 'auto') {
-                  process.stdout.write(
-                    `\n[approval] ${chunk.capability_name || chunk.tool_name}\n`
-                  );
+                  process.stdout.write(`\n[approval] ${chunk.tool_name}\n`);
                 } else if (chunk.type === 'tool_result') {
                   process.stdout.write(`[tool done] ${chunk.tool_name || chunk.tool_use_id}\n`);
                 }

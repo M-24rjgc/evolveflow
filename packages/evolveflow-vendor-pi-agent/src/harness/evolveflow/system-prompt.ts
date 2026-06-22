@@ -1,78 +1,65 @@
 /**
- * EvolveFlow system prompt 构建器。
+ * EvolveFlow system prompt 构建（在 pi 包内部）。
  *
- * 把原 sidecar.ts:1449-1532 的 4 mode persona（chat/plan/auto/yolo）提取出来，
- * 加上 <evolveflow_context> 块（由 buildConversationContext 产出的数据渲染），
- * 拼成 AgentHarness systemPrompt callback 返回的完整字符串。
- *
- * 这是 §5.2 接缝 1 的实现：不改 pi 代码，经 systemPrompt callback 注入。
+ * 4 mode persona + <evolveflow_context> 块渲染。
+ * persona 文案源自原 sidecar.ts:1449-1532（已验证有效的措辞）。
  */
 
-import type { AgentTool } from '@evolveflow/vendor-pi-agent';
-import type { ConversationContext } from './types.js';
-import type { AgentMode } from './deepseek.js';
+import type { AgentTool } from '../../types.ts';
+import type { EvolveFlowAgentMode } from './mode.ts';
 
 /**
- * 按 mode 过滤激活的工具集。
- * - chat：无工具（纯对话，不能操作数据）。
- * - plan：只读能力工具（无 mutating）。
- * - auto/yolo：全部能力工具。
- *
- * 见 FUSION-ARCHITECTURE §4.5 mode 矩阵。
+ * EvolveFlow 上下文数据（与 runtime ConversationContext 形状一致）。
+ * 定义在 pi 包内避免反向依赖 runtime。
  */
-export function filterToolsByMode(tools: AgentTool[], mode: AgentMode): AgentTool[] {
-  switch (mode) {
-    case 'chat':
-      return []; // chat 无工具
-    case 'plan':
-      // plan 只读：排除 mutating 能力工具。能力工具名形如 'task.create'，
-      // 我们没有 mutating 标记直接可用，但 capability 名约定：含 .create/.update/.delete/
-      // .complete/.lock/.cancel/.defer/.clear/.revert/.snooze/.run 等动作词的是 mutating。
-      return tools.filter((t) => !isMutatingToolName(t.name));
-    case 'auto':
-    case 'yolo':
-      return tools;
-  }
-}
-
-/** 能力工具名是否表示变更操作（用于 plan 模式过滤）。
- * 兼容原始名（task.create）和清洗名（task__create）。*/
-function isMutatingToolName(name: string): boolean {
-  // 兼容两种分隔：点号（原始）和双下划线（清洗后）。
-  const normalized = name.replace(/__/g, '.');
-  const action = normalized.split('.').pop() ?? '';
-  const mutatingActions = new Set([
-    'create',
-    'update',
-    'delete',
-    'cancel',
-    'complete',
-    'defer',
-    'lock',
-    'unlock',
-    'clear',
-    'revert',
-    'snooze',
-    'run',
-    'set',
-    'plan_day',
-    'plan_range',
-    'rebalance',
-    'restore',
-    'clear_ai_history',
-    'clear_learned_state',
-  ]);
-  return mutatingActions.has(action);
+export interface EvolveFlowContext {
+  currentDate: string;
+  todayTasks: Array<{
+    id: string;
+    title: string;
+    status: string;
+    dueDate?: string;
+    priority?: number;
+    estimatedMinutes?: number;
+    project?: string;
+  }>;
+  todayEvents: Array<{
+    id: string;
+    title: string;
+    startTime: string;
+    endTime: string;
+  }>;
+  todayBlocks: Array<{
+    id: string;
+    taskId?: string;
+    title: string;
+    startTime: string;
+    endTime: string;
+    isLocked: boolean;
+  }>;
+  overdueTasks: Array<{
+    id: string;
+    title: string;
+    dueDate: string | undefined;
+  }>;
+  workHours: { start: string; end: string };
+  scheduleStyle: string;
+  preferences: Record<string, string>;
+  dreamInsights: string[];
+  pendingReminders: number;
+  completedToday: number;
+  totalPending: number;
+  truncationNotes?: string[];
 }
 
 /**
- * 构建 EvolveFlow 的完整 system prompt。
- * 结构：persona（按 mode）+ <evolveflow_context>（实时数据快照）+ 工具列表提示。
+ * 构建完整 EvolveFlow system prompt。
+ * persona（按 mode）+ <evolveflow_context>（数据快照）+ 工具列表。
  */
 export function buildEvolveFlowSystemPrompt(
-  mode: AgentMode,
-  ctx: ConversationContext,
-  activeTools: AgentTool[]
+  mode: EvolveFlowAgentMode,
+  ctx: EvolveFlowContext,
+  activeTools: AgentTool[],
 ): string {
   const persona = buildPersonaForMode(mode);
   const contextBlock = renderEvolveFlowContext(ctx);
@@ -80,8 +67,7 @@ export function buildEvolveFlowSystemPrompt(
   return [persona, contextBlock, toolHint].filter((s) => s.length > 0).join('\n\n');
 }
 
-/** 按 mode 生成 persona 文案（提取自原 sidecar.ts:1449-1532，保留已验证有效的措辞）。 */
-function buildPersonaForMode(mode: AgentMode): string {
+function buildPersonaForMode(mode: EvolveFlowAgentMode): string {
   switch (mode) {
     case 'chat':
       return `你是 EvolveFlow 桌面端的 AI 对话助手。
@@ -164,8 +150,7 @@ function buildPersonaForMode(mode: AgentMode): string {
   }
 }
 
-/** 把 ConversationContext 渲染成 <evolveflow_context> XML 块。 */
-function renderEvolveFlowContext(ctx: ConversationContext): string {
+function renderEvolveFlowContext(ctx: EvolveFlowContext): string {
   const lines: string[] = [];
   lines.push(`<evolveflow_context>`);
   lines.push(`当前日期时间: ${ctx.currentDate}`);
@@ -231,11 +216,8 @@ function renderEvolveFlowContext(ctx: ConversationContext): string {
   return lines.join('\n');
 }
 
-/** 工具列表提示（告诉 AI 有哪些工具可用）。 */
 function renderToolHint(activeTools: AgentTool[]): string {
-  if (activeTools.length === 0) {
-    return '';
-  }
+  if (activeTools.length === 0) return '';
   const lines = ['## 可用工具（按需调用）'];
   for (const t of activeTools) {
     const desc = t.description ? ` — ${t.description.split('\n')[0]}` : '';

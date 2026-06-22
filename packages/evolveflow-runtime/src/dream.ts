@@ -13,7 +13,7 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import type Database from 'better-sqlite3';
 // Dream 不再直接依赖 ApiClient——改用 AiCompleter 接口（pi-backed），解耦旧 AI 代码。
-import type { AiCompleter } from './ai/sidecar-pi-bridge.js';
+import type { AiCompleter } from './ai/ai-pi-glue.js';
 
 // ── Configuration ──────────────────────────────────────────────
 

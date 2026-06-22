@@ -1,5 +1,6 @@
 // EvolveFlow runtime 包入口。
-// 旧 AI 代码（loop/client/tools/AnthropicTool）已删除，AI 路径改用 pi Agent（见 ai/ 目录）。
+// AI 逻辑全在 pi 包内部（evolveflow-vendor-pi-agent/src/harness/evolveflow/）。
+// runtime 只提供：数据层（context/types）、Dream/Buddy 编排、AI 胶水（ai-pi-glue）。
 
 export {
   CAPABILITIES,
@@ -24,9 +25,6 @@ export { getEnvDeepSeekApiKey } from './ai/deepseek.js';
 export type { AgentMode } from './ai/deepseek.js';
 export { buildConversationContext } from './ai/context.js';
 export type { AiStreamChunk, ConversationContext } from './ai/types.js';
-// pi Agent 路径入口
-export { HarnessManager, createInMemoryHarnessManager } from './ai/harness-manager.js';
-export { SessionStore } from './ai/session-store.js';
-export { createPiCompleter } from './ai/sidecar-pi-bridge.js';
-export type { AiCompleter } from './ai/sidecar-pi-bridge.js';
-export { createEvolveFlowNativeTools } from './ai/native-tools.js';
+// AI 胶水（runtime 侧极薄层，调 pi 包集成）
+export { piComplete } from './ai/ai-pi-glue.js';
+export type { AiCompleter } from './ai/ai-pi-glue.js';

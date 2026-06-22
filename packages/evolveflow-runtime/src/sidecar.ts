@@ -28,19 +28,18 @@ import * as crypto from 'crypto';
 import { EvolveFlowDatabase, ensureDataDirs } from '@evolveflow/storage';
 import { createRegistry } from '@evolveflow/capabilities';
 
-// ── AI Engine（pi Agent 路径，默认）──────────────────────────
+// ── AI Engine（pi 包内部集成层，runtime 只做胶水）──────────
 import type { AgentMode } from './ai/deepseek.js';
 import { getEnvDeepSeekApiKey } from './ai/deepseek.js';
 import { buildConversationContext } from './ai/context.js';
 import {
-  bindSidecarPiEnv,
-  handleAiStreamPi,
-  handleAiChatPi,
-  handleAiCancelStreamPi,
-  resolveApprovalPi,
-  createPiCompleter,
-  type AiCompleter,
-} from './ai/sidecar-pi-bridge.js';
+  bindAiGlue,
+  handleAiStream as handleAiStreamPi,
+  handleAiChat as handleAiChatPi,
+  handleAiCancelStream as handleAiCancelStreamPi,
+  resolveApproval as resolveApprovalPi,
+  piComplete,
+} from './ai/ai-pi-glue.js';
 import type { ConversationContext } from './ai/types.js';
 
 // ── Dream Orchestrator ─────────────────────────────────────────
@@ -154,7 +153,7 @@ const ALLOWED_CAPABILITIES = new Set([
 
 let _registry: ReturnType<typeof createRegistry> | null = null;
 let _db: EvolveFlowDatabase | null = null;
-let _aiCompleter: AiCompleter | null = null;
+let _aiCompleterReady = false; // 标记 apiKey 是否已就绪（completer 是无状态的 piComplete）
 let _lastConnectivityCheckAt = 0;
 let _lastConnectivityResult: { connected: boolean; reason?: string } = {
   connected: false,
@@ -386,8 +385,7 @@ async function handleMessage(msg: Message): Promise<JsonRpcResponse | null> {
     const now = Date.now();
     if (force || now - _lastConnectivityCheckAt > 300_000) {
       try {
-        const completer = _aiCompleter ?? createPiCompleter();
-        await completer([{ role: 'user', content: 'ping' }], 'reply ok', { maxTokens: 8 });
+        await piComplete([{ role: 'user', content: 'ping' }], 'reply ok', { maxTokens: 8 });
         _lastConnectivityResult = { connected: true };
       } catch (err) {
         _lastConnectivityResult = {
@@ -743,7 +741,7 @@ async function handleAiSuggestTodayPi(
   _params: Record<string, unknown>,
   traceId: string
 ): Promise<JsonRpcResponse> {
-  if (!_aiCompleter || !_registry || !_db) {
+  if (!_aiCompleterReady || !_registry || !_db) {
     return {
       jsonrpc: '2.0',
       id: request.id,
@@ -768,7 +766,7 @@ async function handleAiSuggestTodayPi(
       pendingReminders: context.pendingReminders,
     };
 
-    const { text } = await _aiCompleter(
+    const { text } = await piComplete(
       [
         {
           role: 'user',
@@ -832,7 +830,7 @@ async function handleSummaryGenerateDaily(
     let insights: string[] | undefined;
     let summaryText: string | undefined;
 
-    if (_aiCompleter && data) {
+    if (_aiCompleterReady && data) {
       try {
         const date = (params.date as string) || new Date().toISOString().split('T')[0];
         const completedItems = Array.isArray(data.completed_items)
@@ -887,7 +885,7 @@ Return ONLY valid JSON. No markdown, no code fences, no explanation:
   "mood": "productive|moderate|needs_improvement"
 }`;
 
-        const aiResult = await _aiCompleter(
+        const aiResult = await piComplete(
           [{ role: 'user', content: prompt }],
           'You are a productivity analysis assistant. Reply ONLY valid JSON.',
           { maxTokens: 500, temperature: 0.7 }
@@ -1142,7 +1140,8 @@ function resolveAgentMode(value: unknown, fallback: AgentMode): AgentMode {
 function initAiEngine(_apiKey: string): void {
   _lastConnectivityCheckAt = 0;
   _lastConnectivityResult = { connected: false, reason: 'not checked' };
-  _aiCompleter = createPiCompleter();
+  // completer 是无状态的 piComplete（每次内部取最新 key），只需标记就绪。
+  _aiCompleterReady = !!(_apiKey || getEnvDeepSeekApiKey());
 }
 
 // ── Main ──────────────────────────────────────────────────────
@@ -1154,8 +1153,8 @@ function main(): void {
   _db = db;
   _registry = createRegistry(db, dataDir);
 
-  // 绑定 pi 路径环境（默认路径，ai.stream/chat/cancel/suggest 都走 pi Agent）。
-  bindSidecarPiEnv({
+  // 绑定 AI 胶水环境（pi 包集成层，ai.stream/chat/cancel/suggest 都经它）。
+  bindAiGlue({
     db,
     registry: _registry,
     sendNotification,
@@ -1175,21 +1174,21 @@ function main(): void {
     /* use default level */
   }
 
-  // Initialize AI completer (pi-backed; HarnessManager lazy-init in bridge)
+  // Initialize AI completer (pi-backed; harness 经 ai-pi-glue 懒建)
   try {
     initAiEngine(getStoredApiKey());
   } catch {
     initAiEngine('');
   }
 
-  // Initialize dream orchestrator（用 pi AiCompleter，不再依赖旧 ApiClient）
+  // Initialize dream orchestrator（用 piComplete，不再依赖旧 ApiClient）
   const memoryDir = path.join(dataDir, 'memories');
   if (!fs.existsSync(memoryDir)) {
     fs.mkdirSync(memoryDir, { recursive: true });
   }
   const rawDb = db.getDb();
-  if (_aiCompleter) {
-    _dreamOrchestrator = new DreamOrchestrator(memoryDir, rawDb, _aiCompleter);
+  if (_aiCompleterReady) {
+    _dreamOrchestrator = new DreamOrchestrator(memoryDir, rawDb, piComplete);
   }
   const preferenceService = new PreferenceService(rawDb);
   _memoryProjectionService = new MemoryProjectionService(rawDb, preferenceService);
@@ -1263,12 +1262,12 @@ function main(): void {
     if (setKey === 'api_key') {
       const apiKey = (input as { value?: string })?.value || '';
       initAiEngine(apiKey);
-      // api_key 变了，Dream 用 pi AiCompleter（每次调用都取最新 key），这里只需保证 completer 已建。
-      if (_aiCompleter && !_dreamOrchestrator && rawDb) {
+      // api_key 就绪后建 Dream（completer 是无状态的 piComplete）
+      if (_aiCompleterReady && !_dreamOrchestrator && rawDb) {
         _dreamOrchestrator = new DreamOrchestrator(
           path.join(os.homedir(), '.evolveflow', 'app-data', 'memories'),
           rawDb,
-          _aiCompleter
+          piComplete
         );
       }
     } else if (setKey === 'buddy_level') {

@@ -1,8 +1,8 @@
 /**
- * EvolveFlow CLI Agent（pi 路径版）。
+ * EvolveFlow CLI Agent（pi 包集成层）。
  *
- * 经 runtime 的 HarnessManager（pi Agent）跑对话，替代旧的 ApiClient + runConversation。
- * CLI 是开发/调试工具，复用 sidecar 同款 AI 路径。
+ * 直接调 pi 包的 createEvolveFlowHarness（AI 逻辑全在 pi 内部）。
+ * CLI 是开发/调试工具，复用与 sidecar 同款的 pi AgentHarness 路径。
  */
 import * as crypto from 'crypto';
 import * as os from 'os';
@@ -11,13 +11,18 @@ import { EvolveFlowDatabase, ensureDataDirs } from '@evolveflow/storage';
 import { createRegistry } from '@evolveflow/capabilities';
 import { PreferenceService } from '@evolveflow/domain';
 import {
-  HarnessManager,
-  getEnvDeepSeekApiKey,
-  type AgentMode,
-  type AiStreamChunk,
-} from '@evolveflow/runtime';
+  createEvolveFlowHarness,
+  resolveEvolveFlowMode,
+  type EvolveFlowAgentMode,
+  type EvolveFlowChunk,
+  type EvolveFlowContext,
+} from '@evolveflow/vendor-pi-agent';
+import type { AgentHarness } from '@evolveflow/vendor-pi-agent';
+import { capabilitiesToAgentTools } from '@evolveflow/pi-bridge';
+import { buildConversationContext } from '@evolveflow/runtime';
+import { getEnvDeepSeekApiKey } from '@evolveflow/runtime';
 
-export type { AgentMode };
+export type { EvolveFlowAgentMode as AgentMode };
 
 export interface CliAgent {
   db: EvolveFlowDatabase;
@@ -37,17 +42,17 @@ export interface CliAgentStatus {
 }
 
 export interface CliPromptOptions {
-  mode?: AgentMode;
+  mode?: EvolveFlowAgentMode;
   sessionId?: string;
   stream?: boolean;
-  onChunk?: (chunk: AiStreamChunk) => void;
+  onChunk?: (chunk: EvolveFlowChunk) => void;
 }
 
 export interface CliPromptResult {
   sessionId: string;
   text: string;
   error?: string;
-  chunks: AiStreamChunk[];
+  chunks: EvolveFlowChunk[];
 }
 
 export function getDataDir(): string {
@@ -59,6 +64,15 @@ export function getDataDir(): string {
 export function getDb(): EvolveFlowDatabase {
   const dataDir = getDataDir();
   return new EvolveFlowDatabase(path.join(dataDir, 'evolveflow.db'));
+}
+
+/** CLI 简化的上下文（空数据库则返回最小可用上下文）。 */
+async function buildCliContext(
+  db: EvolveFlowDatabase,
+  registry: ReturnType<typeof createRegistry>
+): Promise<EvolveFlowContext> {
+  const ctx = await buildConversationContext(db, registry);
+  return ctx as unknown as EvolveFlowContext;
 }
 
 export function createCliAgent(): CliAgent {
@@ -78,75 +92,92 @@ export function createCliAgent(): CliAgent {
     baseUrl: 'https://api.deepseek.com',
   };
 
-  // 经 HarnessManager（pi Agent 路径）。
-  const manager = apiKey
-    ? new HarnessManager({
-        db,
-        registry,
-        apiKey,
-        onChunk: () => {
-          /* CLI 的 onChunk 在 runPrompt 里单独收集（经 mode/sessionId） */
-        },
-      })
-    : null;
+  const harnesses = new Map<string, AgentHarness>();
+
+  async function getHarness(sessionId: string, mode: EvolveFlowAgentMode): Promise<AgentHarness> {
+    if (harnesses.has(sessionId)) {
+      return harnesses.get(sessionId)!;
+    }
+    if (!apiKey) {
+      throw new Error(
+        'DeepSeek API Key 未配置。请在桌面端设置页保存 API Key，或设置 EVOLVEFLOW_AI_KEY / DEEPSEEK_API_KEY。'
+      );
+    }
+    const context = await buildCliContext(db, registry);
+    const capabilityTools = capabilitiesToAgentTools(registry, {
+      actor: 'ai',
+      origin: 'cli',
+      session_id: sessionId,
+    });
+    const harness = await createEvolveFlowHarness({
+      apiKey,
+      capabilityTools,
+      mode,
+      sessionId,
+      context,
+    });
+    harnesses.set(sessionId, harness);
+    return harness;
+  }
 
   return {
     db,
     status,
     async runPrompt(prompt: string, options: CliPromptOptions = {}) {
-      if (!manager) {
-        throw new Error(
-          'DeepSeek API Key 未配置。请在桌面端设置页保存 API Key，或设置 EVOLVEFLOW_AI_KEY / DEEPSEEK_API_KEY。'
-        );
-      }
-      const mode = options.mode || 'chat';
+      const mode = resolveEvolveFlowMode(options.mode, 'chat');
       const sessionId = options.sessionId || `cli_${crypto.randomUUID()}`;
-      const chunks: AiStreamChunk[] = [];
-
-      // 包装一个收集 onChunk 的 manager（复用同一 registry/db/apiKey，但带收集回调）。
-      const collectingManager = new HarnessManager({
-        db,
-        registry,
-        apiKey: apiKey!,
-        onChunk: (chunk) => {
-          chunks.push(chunk);
-          if (options.stream) {
-            options.onChunk?.(chunk);
-          }
-        },
-      });
+      const chunks: EvolveFlowChunk[] = [];
 
       let text = '';
       let error = '';
       try {
-        text = await collectingManager.prompt(sessionId, mode, prompt, {
+        // 为收集 chunk 重建 harness（带 onEvent）。
+        const context = await buildCliContext(db, registry);
+        const capabilityTools = capabilitiesToAgentTools(registry, {
           actor: 'ai',
           origin: 'cli',
           session_id: sessionId,
         });
+        const harness = await createEvolveFlowHarness({
+          apiKey: apiKey!,
+          capabilityTools,
+          mode,
+          sessionId,
+          context,
+          onEvent: (chunk) => {
+            chunks.push(chunk);
+            if (options.stream) {
+              options.onChunk?.(chunk);
+            }
+          },
+        });
+        const assistantMsg = await harness.prompt(prompt);
+        text = (assistantMsg.content ?? [])
+          .filter((c) => c.type === 'text')
+          .map((c) => ('text' in c ? c.text : ''))
+          .join('');
       } catch (err) {
         error = err instanceof Error ? err.message : String(err);
       }
-      await collectingManager.disposeAll();
       return { sessionId, text, error: error || undefined, chunks };
     },
     async checkConnectivity() {
-      if (!manager) {
+      if (!apiKey) {
         return false;
       }
       try {
-        await manager.prompt(`conn_${crypto.randomUUID()}`, 'chat', 'ping', {
-          actor: 'ai',
-          origin: 'cli',
-          session_id: 'conn',
-        });
+        const harness = await getHarness(`conn_${crypto.randomUUID()}`, 'chat');
+        await harness.prompt('ping');
         return true;
       } catch {
         return false;
       }
     },
     close() {
-      void manager?.disposeAll();
+      for (const h of harnesses.values()) {
+        void h.abort().catch(() => {});
+      }
+      harnesses.clear();
       db.close();
     },
   };
